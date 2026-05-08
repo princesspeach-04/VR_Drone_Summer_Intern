@@ -1,4 +1,6 @@
-using UnityEngine;
+ï»¿using UnityEngine;
+using System.Net.Sockets;
+using System.Text;
 
 public class HeadTracker : MonoBehaviour
 {
@@ -9,9 +11,11 @@ public class HeadTracker : MonoBehaviour
     [Header("Smoothing")]
     public float smoothSpeed = 5f;
 
-    [Header("Debug")]
-    public bool enableDebugLogs = true;
-    public float logInterval = 0.1f; // seconds
+    [Header("Network")]
+    public string jetsonIP = "192.168.137.160";
+    public int port = 6000;
+
+    private UdpClient udp;
 
     public float currentYaw;
     public float currentPitch;
@@ -19,41 +23,57 @@ public class HeadTracker : MonoBehaviour
     private float smoothYaw;
     private float smoothPitch;
 
-    private float logTimer;
+    void Start()
+    {
+        Debug.Log("HeadTracker STARTED");
+
+        try
+        {
+            udp = new UdpClient();
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError("UDP init failed: " + e.Message);
+        }
+    }
 
     void Update()
     {
+        // Safety check
+        if (udp == null)
+        {
+            Debug.LogError("UDP is NULL!");
+            return;
+        }
+
+        // Get headset rotation
         Vector3 raw = transform.localEulerAngles;
 
-        // Convert 0-360 to -180 to +180
         float yaw = NormalizeAngle(raw.y);
         float pitch = NormalizeAngle(raw.x);
 
-        // Clamp to realistic gimbal limits
+        // Clamp
         yaw = Mathf.Clamp(yaw, -maxYaw, maxYaw);
         pitch = Mathf.Clamp(pitch, -maxPitch, maxPitch);
 
-        // Smooth values
+        // Smooth
         smoothYaw = Mathf.Lerp(smoothYaw, yaw, Time.deltaTime * smoothSpeed);
         smoothPitch = Mathf.Lerp(smoothPitch, pitch, Time.deltaTime * smoothSpeed);
 
-        // Final usable outputs
         currentYaw = smoothYaw;
         currentPitch = smoothPitch;
 
-        // Controlled debug logging
-        if (enableDebugLogs)
+        // Send data
+        string message = currentYaw.ToString("F2") + "," + currentPitch.ToString("F2");
+        byte[] data = Encoding.UTF8.GetBytes(message);
+
+        try
         {
-            logTimer += Time.deltaTime;
-
-            if (logTimer >= logInterval)
-            {
-                Debug.Log(
-                    $"Yaw: {currentYaw:F1}° | Pitch: {currentPitch:F1}°"
-                );
-
-                logTimer = 0f;
-            }
+            udp.Send(data, data.Length, jetsonIP, port);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError("UDP send failed: " + e.Message);
         }
     }
 
@@ -61,7 +81,14 @@ public class HeadTracker : MonoBehaviour
     {
         if (angle > 180f)
             angle -= 360f;
-
         return angle;
+    }
+
+    void OnApplicationQuit()
+    {
+        if (udp != null)
+        {
+            udp.Close();
+        }
     }
 }

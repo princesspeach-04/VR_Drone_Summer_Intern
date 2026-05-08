@@ -646,9 +646,6 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 7917674758326848201, guid: 77e7c27b2c5525e4aa8cc9f99d654486, type: 3}
       insertIndex: -1
       addedObject: {fileID: 1373153109}
-    - targetCorrespondingSourceObject: {fileID: 7917674758326848201, guid: 77e7c27b2c5525e4aa8cc9f99d654486, type: 3}
-      insertIndex: -1
-      addedObject: {fileID: 1373153116}
   m_SourcePrefab: {fileID: 100100000, guid: 77e7c27b2c5525e4aa8cc9f99d654486, type: 3}
 --- !u!1 &1373153107 stripped
 GameObject:
@@ -670,8 +667,8 @@ MonoBehaviour:
   maxYaw: 90
   maxPitch: 45
   smoothSpeed: 5
-  jetsonIP: 192.168.137.160
-  port: 6000
+  enableDebugLogs: 1
+  logInterval: 0.1
   currentYaw: 0
   currentPitch: 0
 --- !u!114 &1373153109
@@ -714,18 +711,6 @@ MonoBehaviour:
       type: {class: PassthroughLayerData, ns: UnityEngine.XR.OpenXR.Features.Meta, asm: Unity.XR.MetaOpenXR}
       data:
         m_BlendType: 0
---- !u!114 &1373153116
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1373153107}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 21100e6927f9f2c4b95eeb19ca9a57cc, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::VideoStream
 --- !u!1 &1548251155
 GameObject:
   m_ObjectHideFlags: 0
