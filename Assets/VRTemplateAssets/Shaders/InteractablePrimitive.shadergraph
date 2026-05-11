@@ -557,7 +557,6 @@
     "m_OutputNode": {
         "m_Id": ""
     },
-    "m_SubDatas": [],
     "m_ActiveTargets": [
         {
             "m_Id": "494f438fbbe14594855e8bb2905a1dbe"
@@ -623,8 +622,8 @@
     "m_ObjectId": "06d7d217e7364c0bb6bf5e5924593fa0",
     "m_Title": "Emission",
     "m_Position": {
-        "x": -1020.9998779296875,
-        "y": -25.999950408935548
+        "x": -1020.9999389648438,
+        "y": -25.999916076660158
     }
 }
 
@@ -649,7 +648,7 @@
     "hlslDeclarationOverride": 0,
     "m_Hidden": false,
     "m_Value": {
-        "m_SerializedTexture": "",
+        "m_SerializedTexture": "{\"texture\":{\"instanceID\":0}}",
         "m_Guid": ""
     },
     "isMainTexture": false,
@@ -807,7 +806,7 @@
     "m_DefaultValue": {
         "x": 0.0,
         "y": 0.0,
-        "z": 1.0
+        "z": 0.0
     },
     "m_Labels": []
 }
@@ -1145,7 +1144,7 @@
     "m_StageCapability": 3,
     "m_BareResource": false,
     "m_Texture": {
-        "m_SerializedTexture": "",
+        "m_SerializedTexture": "{\"texture\":{\"instanceID\":0}}",
         "m_Guid": ""
     },
     "m_DefaultType": 0
@@ -1482,7 +1481,7 @@
     "m_StageCapability": 3,
     "m_BareResource": false,
     "m_Texture": {
-        "m_SerializedTexture": "",
+        "m_SerializedTexture": "{\"texture\":{\"instanceID\":0}}",
         "m_Guid": ""
     },
     "m_DefaultType": 3
@@ -1602,9 +1601,6 @@
     "m_AlphaClip": false,
     "m_CastShadows": true,
     "m_ReceiveShadows": true,
-    "m_DisableTint": false,
-    "m_AdditionalMotionVectorMode": 0,
-    "m_AlembicMotionVectors": false,
     "m_SupportsLODCrossFade": false,
     "m_CustomEditorGUI": "",
     "m_SupportVFX": false
@@ -1616,8 +1612,8 @@
     "m_ObjectId": "49bd5bd8d081415aaa6c367bd49ac65e",
     "m_Title": "Normal",
     "m_Position": {
-        "x": -1311.9998779296875,
-        "y": 194.0000762939453
+        "x": -1317.0,
+        "y": 194.00013732910157
     }
 }
 
@@ -1900,7 +1896,7 @@
     "m_ObjectId": "5c22277913d4439f994f4c450fd83d9a",
     "m_Title": "Base Color",
     "m_Position": {
-        "x": -1725.9998779296875,
+        "x": -1726.0,
         "y": -844.9999389648438
     }
 }
@@ -2275,7 +2271,7 @@
     "m_DefaultValue": {
         "x": 0.0,
         "y": 0.0,
-        "z": 1.0
+        "z": 0.0
     },
     "m_Labels": []
 }
@@ -3770,8 +3766,8 @@
     "m_ObjectId": "e344ca1131f848deb1edbf6e062561a4",
     "m_Title": "Edge Highlight",
     "m_Position": {
-        "x": -1730.9998779296875,
-        "y": -413.99993896484377
+        "x": -1731.0,
+        "y": -414.0000305175781
     }
 }
 
@@ -3868,7 +3864,7 @@
     "hlslDeclarationOverride": 0,
     "m_Hidden": false,
     "m_Value": {
-        "m_SerializedTexture": "",
+        "m_SerializedTexture": "{\"texture\":{\"instanceID\":0}}",
         "m_Guid": ""
     },
     "isMainTexture": false,
