@@ -15,34 +15,42 @@ public class SignalingClient : MonoBehaviour
 
     async void Start()
     {
-        // ✅ REQUIRED
+        Application.runInBackground = true;
+
+        // IMPORTANT: Only this (no Initialize)
         StartCoroutine(WebRTC.Update());
 
         pc = new RTCPeerConnection();
 
-        // 🔥 CRITICAL FIX — FORCE VIDEO RECEIVER
-        var config = new RTCRtpTransceiverInit
-        {
-            direction = RTCRtpTransceiverDirection.RecvOnly
-        };
-        pc.AddTransceiver(TrackKind.Video, config);
+        // Force receive video
+        pc.AddTransceiver(TrackKind.Video,
+            new RTCRtpTransceiverInit
+            {
+                direction = RTCRtpTransceiverDirection.RecvOnly
+            });
 
-        // ✅ RECEIVE VIDEO TRACK
+        // 🎥 RECEIVE TRACK
         pc.OnTrack = e =>
         {
             Debug.Log("Track received!");
 
             if (e.Track is VideoStreamTrack track)
             {
+                // Create unique material instance (VERY IMPORTANT)
+                screen.material = new Material(screen.material);
+
                 track.OnVideoReceived += tex =>
                 {
                     Debug.Log("🔥 FRAME RECEIVED 🔥");
+
+                    // URP-safe assignment
+                    screen.material.SetTexture("_BaseMap", tex);
                     screen.material.mainTexture = tex;
                 };
             }
         };
 
-        // ✅ SEND ICE
+        // ICE
         pc.OnIceCandidate = candidate =>
         {
             if (candidate == null) return;
@@ -57,7 +65,6 @@ public class SignalingClient : MonoBehaviour
         };
 
         ws = new ClientWebSocket();
-
         Uri serverUri = new Uri("ws://192.168.137.231:8443");
 
         await ws.ConnectAsync(serverUri, CancellationToken.None);
@@ -96,7 +103,7 @@ public class SignalingClient : MonoBehaviour
                 continue;
             }
 
-            // SDP OFFER
+            // SDP
             var msg = JsonUtility.FromJson<SDPMessage>(message);
 
             if (msg.sdp != null)
@@ -125,8 +132,6 @@ public class SignalingClient : MonoBehaviour
         var opLocal = pc.SetLocalDescription(ref desc);
         yield return opLocal;
 
-        Debug.Log("Sending Answer");
-
         string json = "{\"sdp\":{\"type\":\"answer\",\"sdp\":\""
             + desc.sdp.Replace("\r", "").Replace("\n", "\\n")
             + "\"}}";
@@ -143,19 +148,13 @@ public class SignalingClient : MonoBehaviour
     void OnDestroy()
     {
         pc.Close();
-        pc.Dispose();
+        pc.Dispose(); // this is OK, only Dispose of PeerConnection (NOT WebRTC.Dispose)
     }
 
-    // ===== JSON =====
-
-    [Serializable]
-    public class SDPMessage { public SDP sdp; }
-
-    [Serializable]
-    public class SDP { public string sdp; }
-
-    [Serializable]
-    public class IceMessage { public Ice ice; }
+    // JSON
+    [Serializable] public class SDPMessage { public SDP sdp; }
+    [Serializable] public class SDP { public string sdp; }
+    [Serializable] public class IceMessage { public Ice ice; }
 
     [Serializable]
     public class Ice
