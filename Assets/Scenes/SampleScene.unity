@@ -246,8 +246,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4ebcc8ed1d4b0c64298e15b05419d765, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  url: http://172.20.10.2:8080
+  fallbackUrl: http://172.20.10.2:8080
   screen: {fileID: 264505893}
+  discoveryPort: 9999
 --- !u!1 &727343824
 GameObject:
   m_ObjectHideFlags: 0
