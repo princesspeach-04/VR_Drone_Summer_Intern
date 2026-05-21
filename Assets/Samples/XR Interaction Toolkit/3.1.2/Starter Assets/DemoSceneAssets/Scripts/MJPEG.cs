@@ -10,7 +10,7 @@ public class MJPEGStream : MonoBehaviour
 
     // Jetson advertises itself as this hostname via avahi/mDNS
     // Works on any network — no IP, no UDP, no config ever needed
-    public string jetsonHostname = "jet50n-JARviSH.local";
+    public string jetsonHostname = "100.116.179.56";
     public int    jetsonPort     = 8080;
 
     private const int READ_TIMEOUT_MS    = 3000;
