@@ -139,7 +139,7 @@ GameObject:
   - component: {fileID: 264505894}
   - component: {fileID: 264505893}
   - component: {fileID: 264505892}
-  - component: {fileID: 264505897}
+  - component: {fileID: 264505896}
   m_Layer: 0
   m_Name: VideoScreen
   m_TagString: Untagged
@@ -234,7 +234,7 @@ Transform:
   m_Children: []
   m_Father: {fileID: 165882257}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &264505897
+--- !u!114 &264505896
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -243,12 +243,11 @@ MonoBehaviour:
   m_GameObject: {fileID: 264505891}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 4ebcc8ed1d4b0c64298e15b05419d765, type: 3}
+  m_Script: {fileID: 11500000, guid: f81dc377bef6a7942b16ab29dd73d3c2, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  fallbackUrl: http://172.20.10.2:8080
+  url: http://172.20.10.2:8080/offer
   screen: {fileID: 264505893}
-  discoveryPort: 9999
 --- !u!1 &727343824
 GameObject:
   m_ObjectHideFlags: 0
