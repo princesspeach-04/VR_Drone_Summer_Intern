@@ -1,183 +1,118 @@
 using UnityEngine;
+using UnityEngine.Networking;
 using System.Collections;
-using System.IO;
-using System.Net;
-using System.Threading;
+using System.Text;
 
 public class MJPEGStream : MonoBehaviour
 {
     public Renderer screen;
-
-    // Jetson advertises itself as this hostname via avahi/mDNS
-    // Works on any network — no IP, no UDP, no config ever needed
     public string jetsonHostname = "100.116.179.56";
-    public int    jetsonPort     = 8080;
-
-    private const int READ_TIMEOUT_MS    = 3000;
-    private const int CONNECT_TIMEOUT_MS = 10000;
-    private const int RETRY_DELAY_MS     = 2000;
-    private const int FRAME_BUFFER_SIZE  = 400000;
-    private const int READ_BUFFER_SIZE   = 16384;
+    public int jetsonPort = 8080;
 
     private Texture2D tex;
-    private volatile byte[] latestFrame;
-    private volatile bool   streamConnected = false;
-    private volatile int    frameCount      = 0;
+    private const int FRAME_BUFFER_SIZE = 400000;
 
     void Start()
     {
-        Debug.Log("[MJPEG] Start() — connecting to " + jetsonHostname);
-        Application.runInBackground = true;
-        Application.targetFrameRate = 120;
-        QualitySettings.vSyncCount  = 0;
+        if (screen == null) { Debug.LogError("[MJPEG] Screen is null"); return; }
 
-        if (screen == null) { Debug.LogError("[MJPEG] SCREEN IS NULL!"); return; }
-
-        screen.material             = new Material(screen.material);
-        tex                         = new Texture2D(640, 480, TextureFormat.RGB24, false);
-        tex.wrapMode                = TextureWrapMode.Clamp;
-        tex.filterMode              = FilterMode.Trilinear;
+        screen.material = new Material(screen.material);
+        tex = new Texture2D(2, 2, TextureFormat.RGB24, false);
+        tex.wrapMode = TextureWrapMode.Clamp;
         screen.material.mainTexture = tex;
 
-        Thread streamThread = new Thread(StreamThread);
-        streamThread.IsBackground = true;
-        streamThread.Start();
-
-        StartCoroutine(ApplyFrames());
-        StartCoroutine(StatusLogger());
+        StartCoroutine(StreamCoroutine());
     }
 
-    void StreamThread()
+    IEnumerator StreamCoroutine()
     {
-        string url = "http://" + jetsonHostname + ":" + jetsonPort;
+        string url = $"http://{jetsonHostname}:{jetsonPort}/stream";
 
         while (true)
         {
-            HttpWebResponse response = null;
-            Stream stream            = null;
+            Debug.Log("[MJPEG] Connecting: " + url);
 
-            try
-            {
-                Debug.Log("[MJPEG] Connecting to: " + url);
+            using var req = new UnityWebRequest(url, "GET");
 
-                HttpWebRequest request   = (HttpWebRequest)WebRequest.Create(url);
-                request.Timeout         = CONNECT_TIMEOUT_MS;
-                request.KeepAlive       = true;
-                request.ProtocolVersion = HttpVersion.Version10;
+            // Use a custom download handler that feeds us raw bytes
+            var handler = new MJPEGDownloadHandler(tex, screen);
+            req.downloadHandler = handler;
+            req.timeout = 0; // no timeout — persistent stream
 
-                response           = (HttpWebResponse)request.GetResponse();
-                stream             = response.GetResponseStream();
-                stream.ReadTimeout = READ_TIMEOUT_MS;
+            yield return req.SendWebRequest();
 
-                streamConnected = true;
-                Debug.Log("[MJPEG] Connected to " + url);
+            if (req.result != UnityWebRequest.Result.Success)
+                Debug.LogWarning("[MJPEG] Error: " + req.error + " — retrying in 2s");
 
-                byte[] readBuf  = new byte[READ_BUFFER_SIZE];
-                byte[] frameBuf = new byte[FRAME_BUFFER_SIZE];
-                int  frameIndex = 0;
-                bool capturing  = false;
-
-                while (true)
-                {
-                    int bytesRead;
-                    try
-                    {
-                        bytesRead = stream.Read(readBuf, 0, readBuf.Length);
-                    }
-                    catch (IOException ioEx)
-                    {
-                        Debug.LogWarning("[MJPEG] Read error: " + ioEx.Message + " — reconnecting");
-                        break;
-                    }
-
-                    if (bytesRead <= 0) { Debug.LogWarning("[MJPEG] 0 bytes — reconnecting"); break; }
-
-                    for (int i = 0; i < bytesRead; i++)
-                    {
-                        // SOI 0xFF 0xD8
-                        if (!capturing && i < bytesRead - 1 &&
-                            readBuf[i] == 0xFF && readBuf[i + 1] == 0xD8)
-                        {
-                            capturing  = true;
-                            frameIndex = 0;
-                        }
-
-                        if (capturing)
-                        {
-                            if (frameIndex < frameBuf.Length)
-                                frameBuf[frameIndex++] = readBuf[i];
-                            else
-                            {
-                                Debug.LogWarning("[MJPEG] Frame buffer overflow — resetting");
-                                capturing  = false;
-                                frameIndex = 0;
-                                continue;
-                            }
-
-                            // EOI 0xFF 0xD9
-                            if (i < bytesRead - 1 &&
-                                readBuf[i] == 0xFF && readBuf[i + 1] == 0xD9)
-                            {
-                                if (frameIndex < frameBuf.Length)
-                                    frameBuf[frameIndex++] = readBuf[i + 1];
-
-                                byte[] newFrame = new byte[frameIndex];
-                                System.Buffer.BlockCopy(frameBuf, 0, newFrame, 0, frameIndex);
-                                latestFrame = newFrame;
-                                frameCount++;
-
-                                if (frameCount <= 5 || frameCount % 100 == 0)
-                                    Debug.Log("[MJPEG] Frame #" + frameCount +
-                                              " | " + frameIndex + " bytes");
-
-                                capturing = false;
-                                i++;
-                            }
-                        }
-                    }
-                }
-            }
-            catch (System.Exception e)
-            {
-                streamConnected = false;
-                Debug.LogError("[MJPEG] Error: " + e.Message + " — retrying in " + RETRY_DELAY_MS + "ms");
-            }
-            finally
-            {
-                try { stream?.Close(); }   catch { }
-                try { response?.Close(); } catch { }
-                streamConnected = false;
-            }
-
-            Thread.Sleep(RETRY_DELAY_MS);
+            yield return new WaitForSeconds(2f);
         }
     }
+}
 
-    IEnumerator ApplyFrames()
+public class MJPEGDownloadHandler : DownloadHandlerScript
+{
+    private Texture2D tex;
+    private Renderer screen;
+    private byte[] frameBuf = new byte[400000];
+    private int frameIndex;
+    private bool capturing;
+    private int frameCount;
+
+    // Preallocate the receive buffer
+    public MJPEGDownloadHandler(Texture2D tex, Renderer screen)
+        : base(new byte[16384])
     {
-        while (true)
+        this.tex = tex;
+        this.screen = screen;
+    }
+
+    // Called on the main thread each time Unity receives a chunk
+    protected override bool ReceiveData(byte[] data, int dataLength)
+    {
+        for (int i = 0; i < dataLength; i++)
         {
-            if (latestFrame != null)
+            // Detect SOI  0xFF 0xD8
+            if (!capturing && i < dataLength - 1 &&
+                data[i] == 0xFF && data[i + 1] == 0xD8)
             {
-                byte[] frame = latestFrame;
-                latestFrame  = null;
+                capturing = true;
+                frameIndex = 0;
+            }
+
+            if (!capturing) continue;
+
+            if (frameIndex < frameBuf.Length)
+                frameBuf[frameIndex++] = data[i];
+            else
+            {
+                Debug.LogWarning("[MJPEG] Buffer overflow — reset");
+                capturing = false; frameIndex = 0;
+                continue;
+            }
+
+            // Detect EOI  0xFF 0xD9
+            if (i < dataLength - 1 &&
+                data[i] == 0xFF && data[i + 1] == 0xD9)
+            {
+                frameBuf[frameIndex++] = data[i + 1]; // include 0xD9
+                i++;
+
+                byte[] frame = new byte[frameIndex];
+                System.Buffer.BlockCopy(frameBuf, 0, frame, 0, frameIndex);
+
+                // Already on main thread — load directly
                 if (tex.LoadImage(frame))
                     screen.material.mainTexture = tex;
-                else
-                    Debug.LogWarning("[MJPEG] LoadImage failed");
+
+                frameCount++;
+                capturing = false;
             }
-            yield return new WaitForEndOfFrame();
         }
+        return true; // return false to abort
     }
 
-    IEnumerator StatusLogger()
+    protected override void CompleteContent()
     {
-        while (true)
-        {
-            yield return new WaitForSeconds(3f);
-            Debug.Log("[MJPEG] STATUS — Connected: " + streamConnected +
-                      " | Frames: " + frameCount +
-                      " | Host: "   + jetsonHostname);
-        }
+        Debug.Log("[MJPEG] Stream ended after " + frameCount + " frames");
     }
 }
