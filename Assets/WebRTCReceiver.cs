@@ -2,185 +2,252 @@
 using Unity.WebRTC;
 using UnityEngine.Networking;
 using System.Collections;
-using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
 public class WebRTCReceiver : MonoBehaviour
 {
-    [Header("Server Settings")]
+    [Header("Server")]
     public string url = "http://172.20.10.2:8080/offer";
-    public Renderer screen;
 
-    RTCPeerConnection pc;
-    MediaStream receiveStream;
-    VideoStreamTrack videoTrack;
-    Coroutine texturePoller;
+    [Header("Display")]
+    public Renderer videoRenderer;
 
-    void Start() => StartCoroutine(StartWebRTC());
-    void Update() => WebRTC.Update();
+    private RTCPeerConnection pc;
+    private VideoStreamTrack videoTrack;
+
+    private Texture currentTexture;
+    private Material runtimeMaterial;
+
+    void Start()
+    {
+        Application.runInBackground = true;
+        Application.targetFrameRate = 120;
+        QualitySettings.vSyncCount = 0;
+
+        StartCoroutine(StartWebRTC());
+    }
+
+    void Update()
+    {
+        WebRTC.Update();
+
+        // IMPORTANT:
+        // Continuously refresh texture reference
+        if (videoTrack != null)
+        {
+            Texture tex = videoTrack.Texture;
+
+            if (tex != null)
+            {
+                if (currentTexture != tex)
+                {
+                    currentTexture = tex;
+
+                    Debug.Log("[WebRTC] Texture updated");
+
+                    if (runtimeMaterial == null)
+                    {
+                        runtimeMaterial =
+                            new Material(
+                                Shader.Find("Unlit/Texture"));
+
+                        videoRenderer.material =
+                            runtimeMaterial;
+                    }
+
+                    runtimeMaterial.mainTexture =
+                        currentTexture;
+
+                    runtimeMaterial.mainTextureScale =
+                        new Vector2(1, -1);
+                }
+            }
+        }
+    }
 
     void OnDestroy()
     {
-        if (texturePoller != null) StopCoroutine(texturePoller);
         videoTrack?.Dispose();
-        receiveStream?.Dispose();
-        pc?.Close();
-        pc?.Dispose();
+
+        if (runtimeMaterial != null)
+            Destroy(runtimeMaterial);
+
+        if (pc != null)
+        {
+            pc.Close();
+            pc.Dispose();
+        }
     }
 
     IEnumerator StartWebRTC()
     {
-        Debug.Log("[WebRTC] Starting...");
+        Debug.Log("[WebRTC] Starting");
 
-        var config = new RTCConfiguration
-        {
-            iceServers = new[] { new RTCIceServer { urls = new[] { "stun:stun.l.google.com:19302" } } }
-        };
+        RTCConfiguration config =
+            new RTCConfiguration
+            {
+                iceServers = new[]
+                {
+                    new RTCIceServer
+                    {
+                        urls = new[]
+                        {
+                            "stun:stun.l.google.com:19302"
+                        }
+                    }
+                }
+            };
 
         pc = new RTCPeerConnection(ref config);
-        receiveStream = new MediaStream();
 
-        pc.OnIceConnectionChange = s => Debug.Log($"[WebRTC] ICE: {s}");
-        pc.OnConnectionStateChange = s => Debug.Log($"[WebRTC] Conn: {s}");
-
-        receiveStream.OnAddTrack = e =>
+        pc.OnIceConnectionChange = state =>
         {
-            Debug.Log($"[WebRTC] OnAddTrack: {e.Track.Kind}");
-            if (e.Track is VideoStreamTrack track)
-            {
-                videoTrack = track;
-                texturePoller = StartCoroutine(PollTexture(track));
-            }
+            Debug.Log("[WebRTC] ICE: " + state);
+        };
+
+        pc.OnConnectionStateChange = state =>
+        {
+            Debug.Log("[WebRTC] Conn: " + state);
         };
 
         pc.OnTrack = e =>
         {
-            Debug.Log($"[WebRTC] OnTrack: {e.Track.Kind}");
-            if (e.Track.Kind == TrackKind.Video)
-                receiveStream.AddTrack(e.Track);
+            Debug.Log("[WebRTC] TRACK: " + e.Track.Kind);
+
+            if (e.Track is VideoStreamTrack track)
+            {
+                videoTrack = track;
+
+                Debug.Log("[WebRTC] Video track received");
+            }
         };
 
-        // ✅ Add transceiver — codec filtering happens AFTER offer is created
-        var transceiver = pc.AddTransceiver(TrackKind.Video, new RTCRtpTransceiverInit
-        {
-            direction = RTCRtpTransceiverDirection.RecvOnly
-        });
+        var transceiver =
+            pc.AddTransceiver(
+                TrackKind.Video,
+                new RTCRtpTransceiverInit
+                {
+                    direction =
+                        RTCRtpTransceiverDirection
+                        .RecvOnly
+                });
 
-        // ✅ Force VP8 only — Unity v3 on Windows DX11 decodes VP8/VP9, NOT H.264
-        var caps = RTCRtpReceiver.GetCapabilities(TrackKind.Video);
-        Debug.Log("[WebRTC] Available codecs: " + string.Join(", ", caps.codecs.Select(c => c.mimeType)));
+        var caps =
+            RTCRtpReceiver.GetCapabilities(
+                TrackKind.Video);
 
-        var vp8Codecs = caps.codecs
-            .Where(c => c.mimeType.ToLower() == "video/vp8")
+        var vp8 =
+            caps.codecs
+            .Where(c =>
+                c.mimeType.ToLower() == "video/vp8")
             .ToArray();
 
-        if (vp8Codecs.Length > 0)
+        if (vp8.Length > 0)
         {
-            Debug.Log($"[WebRTC] Forcing VP8 codec");
-            transceiver.SetCodecPreferences(vp8Codecs);
-        }
-        else
-        {
-            Debug.LogWarning("[WebRTC] VP8 not found! Available: " +
-                string.Join(", ", caps.codecs.Select(c => c.mimeType)));
+            Debug.Log("[WebRTC] Using VP8");
+
+            transceiver.SetCodecPreferences(vp8);
         }
 
-        // Create offer
         var offerOp = pc.CreateOffer();
+
         yield return offerOp;
-        if (offerOp.IsError) { Debug.LogError($"CreateOffer: {offerOp.Error.message}"); yield break; }
+
+        if (offerOp.IsError)
+        {
+            Debug.LogError(
+                offerOp.Error.message);
+
+            yield break;
+        }
 
         var offer = offerOp.Desc;
-        var setLocalOp = pc.SetLocalDescription(ref offer);
-        yield return setLocalOp;
-        if (setLocalOp.IsError) { Debug.LogError($"SetLocal: {setLocalOp.Error.message}"); yield break; }
 
-        // Wait for ICE
-        float elapsed = 0f;
-        while (pc.GatheringState != RTCIceGatheringState.Complete && elapsed < 5f)
-        { elapsed += Time.deltaTime; yield return null; }
-        Debug.Log($"[WebRTC] ICE gathered in {elapsed:F2}s");
+        var localOp =
+            pc.SetLocalDescription(ref offer);
 
-        // Send offer
-        var json = JsonUtility.ToJson(new SDP { sdp = pc.LocalDescription.sdp, type = "offer" });
-        var req = new UnityWebRequest(url, "POST");
-        req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
-        req.downloadHandler = new DownloadHandlerBuffer();
-        req.SetRequestHeader("Content-Type", "application/json");
-        req.timeout = 15;
-        yield return req.SendWebRequest();
+        yield return localOp;
 
-        if (req.result != UnityWebRequest.Result.Success)
-        { Debug.LogError($"[WebRTC] HTTP: {req.error}"); yield break; }
-
-        Debug.Log("[WebRTC] Got answer");
-        var answer = JsonUtility.FromJson<SDP>(req.downloadHandler.text);
-        var desc = new RTCSessionDescription { type = RTCSdpType.Answer, sdp = answer.sdp };
-        var setRemoteOp = pc.SetRemoteDescription(ref desc);
-        yield return setRemoteOp;
-        if (setRemoteOp.IsError) { Debug.LogError($"SetRemote: {setRemoteOp.Error.message}"); yield break; }
-
-        Debug.Log("[WebRTC] Handshake complete — waiting for video...");
-
-        // Watchdog
-        while (true)
+        if (localOp.IsError)
         {
-            yield return new WaitForSeconds(3f);
-            var state = pc.ConnectionState;
-            if (state == RTCPeerConnectionState.Failed || state == RTCPeerConnectionState.Disconnected)
-            {
-                Debug.LogWarning("[WebRTC] Lost — restarting...");
-                yield return new WaitForSeconds(2f);
-                pc?.Close(); pc?.Dispose();
-                receiveStream?.Dispose();
-                StartCoroutine(StartWebRTC());
-                yield break;
-            }
+            Debug.LogError(
+                localOp.Error.message);
+
+            yield break;
         }
-    }
 
-    IEnumerator PollTexture(VideoStreamTrack track)
-    {
-        Debug.Log("[WebRTC] Texture poller running...");
-        bool assigned = false;
-        float waited = 0f;
-        RenderTexture rt = null;
-
-        while (track != null)
+        while (pc.GatheringState !=
+               RTCIceGatheringState.Complete)
         {
-            var tex = track.Texture;
-            if (tex != null && screen != null)
-            {
-                // Create RenderTexture once
-                if (rt == null)
-                {
-                    rt = new RenderTexture(tex.width, tex.height, 0, RenderTextureFormat.ARGB32);
-                    rt.Create();
-                    screen.material.SetTexture("_BaseMap", rt);
-                    Debug.Log($"[WebRTC] ✅ RenderTexture created {tex.width}x{tex.height} | shader={screen.material.shader.name}");
-                    assigned = true;
-                }
-
-                // Blit native texture into RenderTexture every frame
-                Graphics.Blit(tex, rt);
-            }
-            else if (!assigned)
-            {
-                waited += Time.deltaTime;
-                if (waited > 10f)
-                {
-                    Debug.LogError("[WebRTC] ❌ track.Texture still null after 10s");
-                    if (rt != null) rt.Release();
-                    yield break;
-                }
-            }
             yield return null;
         }
 
-        if (rt != null) rt.Release();
+        string json =
+            JsonUtility.ToJson(
+                new SDP
+                {
+                    sdp =
+                        pc.LocalDescription.sdp,
+
+                    type = "offer"
+                });
+
+        UnityWebRequest req =
+            new UnityWebRequest(url, "POST");
+
+        req.uploadHandler =
+            new UploadHandlerRaw(
+                Encoding.UTF8.GetBytes(json));
+
+        req.downloadHandler =
+            new DownloadHandlerBuffer();
+
+        req.SetRequestHeader(
+            "Content-Type",
+            "application/json");
+
+        yield return req.SendWebRequest();
+
+        if (req.result !=
+            UnityWebRequest.Result.Success)
+        {
+            Debug.LogError(req.error);
+
+            yield break;
+        }
+
+        SDP answer =
+            JsonUtility.FromJson<SDP>(
+                req.downloadHandler.text);
+
+        RTCSessionDescription desc =
+            new RTCSessionDescription
+            {
+                type = RTCSdpType.Answer,
+                sdp = answer.sdp
+            };
+
+        var remoteOp =
+            pc.SetRemoteDescription(ref desc);
+
+        yield return remoteOp;
+
+        if (remoteOp.IsError)
+        {
+            Debug.LogError(
+                remoteOp.Error.message);
+
+            yield break;
+        }
+
+        Debug.Log("[WebRTC] Connected");
     }
 
     [System.Serializable]
-    class SDP { public string sdp; public string type; }
+    public class SDP
+    {
+        public string sdp;
+        public string type;
+    }
 }
