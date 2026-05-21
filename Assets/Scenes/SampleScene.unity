@@ -122,11 +122,6 @@ NavMeshSettings:
     debug:
       m_Flags: 0
   m_NavMeshData: {fileID: 0}
---- !u!4 &165882257 stripped
-Transform:
-  m_CorrespondingSourceObject: {fileID: 7277802327414017193, guid: 77e7c27b2c5525e4aa8cc9f99d654486, type: 3}
-  m_PrefabInstance: {fileID: 2779669268269126897}
-  m_PrefabAsset: {fileID: 0}
 --- !u!1 &262204441
 GameObject:
   m_ObjectHideFlags: 0
@@ -225,9 +220,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: dd1d983eff5de6f4c80727cfb75604f8, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  headset: {fileID: 165882257}
-  jetsonIP: 192.168.137.231
+  xrOrigin: {fileID: 0}
+  jetsonIP: 192.168.137.91
   port: 5005
+  smoothing: 0.1
 --- !u!114 &727343826
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -240,7 +236,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: f35b90a418f329b41a2e6883d5a921b6, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  headset: {fileID: 165882257}
 --- !u!4 &727343827
 Transform:
   m_ObjectHideFlags: 0
