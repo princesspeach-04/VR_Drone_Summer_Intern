@@ -2,14 +2,14 @@ using UnityEngine;
 
 public class HeadTracker : MonoBehaviour
 {
-    public Transform headset;
-
     void Update()
     {
-        Vector3 rot = headset.eulerAngles;
+        Transform headset = Camera.main.transform;
 
-        float yaw = rot.y;
-        float pitch = rot.x;
+        Vector3 forward = headset.forward;
+
+        float yaw = Mathf.Atan2(forward.x, forward.z) * Mathf.Rad2Deg;
+        float pitch = Mathf.Asin(forward.y) * Mathf.Rad2Deg;
 
         Debug.Log("Yaw: " + yaw + " Pitch: " + pitch);
     }
