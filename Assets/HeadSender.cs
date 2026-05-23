@@ -10,7 +10,7 @@ public class HeadSender : MonoBehaviour
     public XROrigin xrOrigin;
 
     [Header("UDP")]
-    public string jetsonIP = "192.168.137.91";
+    public string jetsonIP = "100.94.87.80";
     public int port = 5005;
 
     [Header("Smoothing")]
@@ -18,31 +18,36 @@ public class HeadSender : MonoBehaviour
     public float smoothing = 0.1f;
 
     private UdpClient client;
-
     private float smoothYaw = 0f;
     private float smoothPitch = 0f;
-
     private float baseYaw = 0f;
     private float basePitch = 0f;
-
     private bool calibrated = false;
 
-    IEnumerator Start()
+    void Start()
     {
-        client = new UdpClient();
-
-        Debug.Log("[HEAD] Waiting for XR initialization...");
-
-        // Wait for OpenXR tracking to stabilize
-        yield return new WaitForSeconds(2f);
-
-        calibrated = false;
-
-        Debug.Log("[HEAD] Ready");
+        // Initialize immediately — no coroutine delay
+        try
+        {
+            client = new UdpClient();
+            client.Connect(jetsonIP, port); // pre-connect so Send is simpler
+            Debug.Log("[HEAD] UDP client connected to " + jetsonIP + ":" + port);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError("[HEAD] Failed to create UDP client: " + e.Message);
+        }
     }
 
     void Update()
     {
+        // Guard against null client
+        if (client == null)
+        {
+            Debug.LogError("[HEAD] UDP client is null!");
+            return;
+        }
+
         if (xrOrigin == null)
         {
             Debug.LogError("[HEAD] XR Origin missing!");
@@ -56,83 +61,42 @@ public class HeadSender : MonoBehaviour
         }
 
         Transform headset = xrOrigin.Camera.transform;
-
         Vector3 forward = headset.forward;
 
-        // Calculate yaw + pitch
-        float yaw =
-            Mathf.Atan2(forward.x, forward.z) * Mathf.Rad2Deg;
+        float yaw = Mathf.Atan2(forward.x, forward.z) * Mathf.Rad2Deg;
+        float pitch = Mathf.Asin(forward.y) * Mathf.Rad2Deg;
 
-        float pitch =
-            Mathf.Asin(forward.y) * Mathf.Rad2Deg;
-
-        // Initial calibration
         if (!calibrated)
         {
             baseYaw = yaw;
             basePitch = pitch;
-
             calibrated = true;
-
             Debug.Log("[HEAD] CALIBRATED");
         }
 
-        // Relative movement
-        float relativeYaw =
-            Mathf.DeltaAngle(baseYaw, yaw);
+        float relativeYaw = Mathf.DeltaAngle(baseYaw, yaw);
+        float relativePitch = pitch - basePitch;
 
-        float relativePitch =
-            pitch - basePitch;
+        smoothYaw = Mathf.Lerp(smoothYaw, relativeYaw, smoothing);
+        smoothPitch = Mathf.Lerp(smoothPitch, relativePitch, smoothing);
 
-        // Smoothing
-        smoothYaw = Mathf.Lerp(
-            smoothYaw,
-            relativeYaw,
-            smoothing
-        );
+        string msg = smoothYaw.ToString("F2") + "," + smoothPitch.ToString("F2");
+        byte[] data = Encoding.UTF8.GetBytes(msg);
 
-        smoothPitch = Mathf.Lerp(
-            smoothPitch,
-            relativePitch,
-            smoothing
-        );
-
-        // Create message
-        string msg =
-            smoothYaw.ToString("F2") + "," +
-            smoothPitch.ToString("F2");
-
-        // Send UDP packet
-        byte[] data =
-            Encoding.UTF8.GetBytes(msg);
-
-        client.Send(
-            data,
-            data.Length,
-            jetsonIP,
-            port
-        );
-
-        // Debug logs
-        Debug.Log(
-            "[HEAD TRACKING] " +
-            "Yaw: " + smoothYaw.ToString("F2") +
-            " Pitch: " + smoothPitch.ToString("F2")
-        );
-
-        // Visual debug ray
-        Debug.DrawRay(
-            headset.position,
-            headset.forward * 3f,
-            Color.red
-        );
+        try
+        {
+            client.Send(data, data.Length); // uses pre-connected address
+            Debug.Log("[HEAD] Sent: " + msg);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError("[HEAD] Send failed: " + e.Message);
+        }
     }
 
     void OnApplicationQuit()
     {
         if (client != null)
-        {
             client.Close();
-        }
     }
 }

@@ -221,7 +221,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   xrOrigin: {fileID: 0}
-  jetsonIP: 192.168.137.91
+  jetsonIP: 100.94.87.80
   port: 5005
   smoothing: 0.1
 --- !u!114 &727343826
