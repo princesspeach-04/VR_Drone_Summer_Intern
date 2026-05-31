@@ -4,13 +4,15 @@ using UnityEngine;
 using UnityEngine.Networking;
 using TMPro;
 
-// ── JSON shapes (unchanged) ───────────────────────────────────
+// ── JSON shapes ───────────────────────────────────────────────
 [System.Serializable]
 public class Detection
 {
     public string label;
     public int x1, y1, x2, y2;
     public float depth_m;
+    // world_x/y/z and tracking kept for JSON
+    // compatibility but not used in marker mode
     public float world_x;
     public float world_y;
     public float world_z;
@@ -37,56 +39,53 @@ public class DetectionOverlay : MonoBehaviour
 
     [Header("Scene refs")]
     public Renderer videoScreen;
-    public GameObject labelPrefab;      // ORIGINAL prefab — untouched
+    public GameObject labelPrefab;
 
-    // ── NEW: 3D wireframe box prefab ──────────────────────────
-    [Header("3D Wireframe Box (Passthrough mode)")]
-    public GameObject wireframeBoxPrefab; // DetectionBox3D prefab
+    [Header("Through-Wall Marker")]
+    public GameObject markerPrefab;
 
-    // How deep to make the box when no SLAM Z size is available
-    public float defaultBoxDepth = 0.3f;
+    [Tooltip("Physical offset in meters from the headset " +
+             "room origin to where the drone sits. " +
+             "Measure once and set in the Inspector.")]
+    public Vector3 droneWorldPosition = new Vector3(0f, 1.2f, 5f);
 
-    [Header("World anchor")]
+    [Header("World anchor / smoothing")]
     public Vector3 worldOrigin = Vector3.zero;
     public float smoothSpeed = 5f;
 
-    // ── internals (original) ──────────────────────────────────
+    // ── internals ─────────────────────────────────────────────
     private Dictionary<int, GameObject> _pool = new();
     private Dictionary<int, Detection> _lastDet = new();
-    private bool _slamTracking = false;
+    private Dictionary<int, ThroughWallMarker> _markerPool = new();
 
-    // ── NEW internals ─────────────────────────────────────────
     private bool _passthroughMode = false;
-    private Dictionary<int, GameObject> _boxPool = new();
 
     // ─────────────────────────────────────────────────────────
     void Start() => StartCoroutine(PollLoop());
 
-    // ── NEW: called by ModeManager ────────────────────────────
+    // ── Called by ModeManager ─────────────────────────────────
     public void SetPassthroughMode(bool passthrough)
     {
         _passthroughMode = passthrough;
 
-        // Hide whichever pool is NOT active
         if (_passthroughMode)
         {
-            // Hide old 2D labels
+            // Hide 2D label pool
             foreach (var go in _pool.Values)
                 if (go != null) go.SetActive(false);
         }
         else
         {
-            // Hide 3D boxes
-            foreach (var go in _boxPool.Values)
-                if (go != null) go.SetActive(false);
+            // Hide through-wall markers
+            foreach (var m in _markerPool.Values)
+                if (m != null) m.Hide();
         }
     }
 
-    // ── Polling coroutine (unchanged) ─────────────────────────
+    // ── Polling coroutine ─────────────────────────────────────
     IEnumerator PollLoop()
     {
-        string url =
-            $"http://{jetsonHostname}:{jetsonPort}/detections";
+        string url = $"http://{jetsonHostname}:{jetsonPort}/detections";
 
         while (true)
         {
@@ -94,20 +93,17 @@ public class DetectionOverlay : MonoBehaviour
             req.timeout = 2;
             yield return req.SendWebRequest();
 
-            if (req.result ==
-                UnityWebRequest.Result.Success)
+            if (req.result == UnityWebRequest.Result.Success)
             {
-                var data =
-                    JsonUtility.FromJson<DetectionResponse>(
-                        req.downloadHandler.text);
+                var data = JsonUtility.FromJson<DetectionResponse>(
+                    req.downloadHandler.text);
 
                 if (data?.detections != null)
                     UpdateOverlay(data.detections);
             }
             else
             {
-                Debug.LogWarning(
-                    "[Detections] " + req.error);
+                Debug.LogWarning("[Detections] " + req.error);
                 HideAll();
             }
 
@@ -115,66 +111,39 @@ public class DetectionOverlay : MonoBehaviour
         }
     }
 
-    // ── Main update ───────────────────────────────────────────
+    // ── Route by mode ─────────────────────────────────────────
     void UpdateOverlay(List<Detection> detections)
     {
-        _slamTracking =
-            detections.Count > 0 &&
-            detections[0].tracking;
-
         if (_passthroughMode)
-            UpdateBoxes(detections);     // NEW path
+            UpdateMarkers(detections);
         else
-            UpdateLabels(detections);    // ORIGINAL path
+            UpdateLabels(detections);
     }
 
-    // ── ORIGINAL label logic — completely unchanged ───────────
+    // ── Camera-feed mode: 2D labels on video quad ─────────────
     void UpdateLabels(List<Detection> detections)
     {
         for (int i = 0; i < detections.Count; i++)
         {
             if (!_pool.ContainsKey(i))
-                _pool[i] = Instantiate(
-                    labelPrefab, transform);
+                _pool[i] = Instantiate(labelPrefab, transform);
 
             var go = _pool[i];
             var det = detections[i];
             go.SetActive(true);
 
-            var tmp =
-                go.GetComponentInChildren<TextMeshPro>();
+            var tmp = go.GetComponentInChildren<TextMeshPro>();
             if (tmp != null)
             {
-                string trackTag =
-                    det.tracking ? "" : " [no pose]";
-                tmp.text = det.label + trackTag;
-                tmp.color = det.tracking
-                    ? Color.white
-                    : Color.yellow;
+                tmp.text = det.label;
+                tmp.color = Color.white;
             }
 
-            Vector3 targetPos;
+            // Position on video quad via UV mapping
+            float u = (det.x1 + det.x2) * 0.5f / streamWidth;
+            float v = (det.y1 + det.y2) * 0.5f / streamHeight;
 
-            if (det.tracking &&
-                (det.world_x != 0 ||
-                 det.world_y != 0 ||
-                 det.world_z != 0))
-            {
-                targetPos = worldOrigin + new Vector3(
-                    -det.world_x,
-                    -det.world_y,
-                     det.world_z);
-            }
-            else
-            {
-                float u =
-                    (det.x1 + det.x2) * 0.5f /
-                    streamWidth;
-                float v =
-                    (det.y1 + det.y2) * 0.5f /
-                    streamHeight;
-                targetPos = PixelToWorld(u, v, det.y1);
-            }
+            Vector3 targetPos = PixelToWorld(u, v, det.y1);
 
             go.transform.position = Vector3.Lerp(
                 go.transform.position,
@@ -184,165 +153,78 @@ public class DetectionOverlay : MonoBehaviour
             _lastDet[i] = det;
         }
 
-        for (int i = detections.Count;
-             i < _pool.Count; i++)
+        for (int i = detections.Count; i < _pool.Count; i++)
             if (_pool.ContainsKey(i))
                 _pool[i].SetActive(false);
     }
 
-    // ── NEW: 3D wireframe box logic ───────────────────────────
-    void UpdateBoxes(List<Detection> detections)
+    // ── Passthrough mode: through-wall marker ─────────────────
+    void UpdateMarkers(List<Detection> detections)
     {
         for (int i = 0; i < detections.Count; i++)
         {
             // Lazy-instantiate from pool
-            if (!_boxPool.ContainsKey(i) ||
-                _boxPool[i] == null)
+            if (!_markerPool.ContainsKey(i) ||
+                _markerPool[i] == null)
             {
-                _boxPool[i] = Instantiate(
-                    wireframeBoxPrefab, transform);
+                var go = Instantiate(markerPrefab, transform);
+                _markerPool[i] =
+                    go.GetComponent<ThroughWallMarker>();
             }
 
-            var go = _boxPool[i];
+            var marker = _markerPool[i];
             var det = detections[i];
-            go.SetActive(true);
 
-            var box =
-                go.GetComponent<WireframeBox>();
-            if (box == null) continue;
+            // Parse class name (strip confidence/depth suffix)
+            string className = det.label.Split(' ')[0];
 
-            Vector3 targetCenter;
-            Vector3 boxSize;
+            // Stack multiple detections slightly upward
+            // so labels don't overlap
+            Vector3 pos = droneWorldPosition +
+                          Vector3.up * (i * 0.35f);
 
-            if (det.tracking &&
-                (det.world_x != 0 ||
-                 det.world_y != 0 ||
-                 det.world_z != 0))
-            {
-                // World-space anchor from SLAM
-                targetCenter = worldOrigin +
-                    new Vector3(
-                        -det.world_x,
-                        -det.world_y,
-                         det.world_z);
-
-                // Estimate physical size from pixel
-                // bbox + depth
-                float d = det.depth_m > 0
-                    ? det.depth_m : 1f;
-
-                // Rough metric size via similar triangles
-                // assuming ~60 deg horizontal FOV
-                float fovFactor = d * 0.93f;
-
-                float wMeters =
-                    ((det.x2 - det.x1) /
-                    (float)streamWidth) * fovFactor;
-
-                float hMeters =
-                    ((det.y2 - det.y1) /
-                    (float)streamHeight) * fovFactor;
-
-                boxSize = new Vector3(
-                    Mathf.Max(wMeters, 0.1f),
-                    Mathf.Max(hMeters, 0.1f),
-                    defaultBoxDepth
-                );
-            }
-            else
-            {
-                // SLAM not tracking — place box on
-                // video quad surface as fallback
-                float u =
-                    (det.x1 + det.x2) * 0.5f /
-                    streamWidth;
-                float v =
-                    (det.y1 + det.y2) * 0.5f /
-                    streamHeight;
-
-                targetCenter =
-                    PixelToWorld(u, v, det.y1);
-
-                // Scale box to match quad proportions
-                if (videoScreen != null)
-                {
-                    var b = videoScreen.bounds;
-                    float wM = ((det.x2 - det.x1) /
-                        (float)streamWidth) *
-                        b.size.x;
-                    float hM = ((det.y2 - det.y1) /
-                        (float)streamHeight) *
-                        b.size.y;
-                    boxSize = new Vector3(
-                        Mathf.Max(wM, 0.05f),
-                        Mathf.Max(hM, 0.05f),
-                        0.001f // flat on quad surface
-                    );
-                }
-                else
-                {
-                    boxSize = new Vector3(
-                        0.2f, 0.2f, defaultBoxDepth);
-                }
-            }
-
-            // Smooth position
-            Vector3 smoothedCenter = Vector3.Lerp(
-                go.transform.position,
-                targetCenter,
-                Time.deltaTime * smoothSpeed);
-
-            // Extract just the class name before
-            // the confidence/depth suffix for clean label
-            string cleanLabel =
-                det.label.Split(' ')[0];
-
-            box.UpdateBox(
-                smoothedCenter,
-                boxSize,
-                cleanLabel);
+            marker.SetData(className, det.depth_m, pos);
         }
 
-        // Hide unused pool entries
-        for (int i = detections.Count;
-             i < _boxPool.Count; i++)
-            if (_boxPool.ContainsKey(i))
-                _boxPool[i].SetActive(false);
+        // Hide unused markers
+        for (int i = detections.Count; i < _markerPool.Count; i++)
+            if (_markerPool.ContainsKey(i) &&
+                _markerPool[i] != null)
+                _markerPool[i].Hide();
     }
 
-    // ── Fallback pixel→world (unchanged) ─────────────────────
+    // ── Pixel → world-space on video quad ────────────────────
     Vector3 PixelToWorld(float u, float v, int pixelY)
     {
         if (videoScreen == null) return Vector3.zero;
         var b = videoScreen.bounds;
         float x = Mathf.Lerp(b.min.x, b.max.x, u);
-        float topV =
-            (float)pixelY / streamHeight;
-        float y =
-            Mathf.Lerp(b.max.y, b.min.y, topV) +
-            b.size.y * 0.03f;
+        float topV = (float)pixelY / streamHeight;
+        float y = Mathf.Lerp(b.max.y, b.min.y, topV)
+                     + b.size.y * 0.03f;
         float z = b.min.z - 0.01f;
         return new Vector3(x, y, z);
     }
 
-    // ── HideAll hides both pools ──────────────────────────────
+    // ── Hide everything ───────────────────────────────────────
     void HideAll()
     {
         foreach (var go in _pool.Values)
             if (go != null) go.SetActive(false);
 
-        foreach (var go in _boxPool.Values)
-            if (go != null) go.SetActive(false);
+        foreach (var m in _markerPool.Values)
+            if (m != null) m.Hide();
     }
 
-    // ── Debug gizmo (unchanged) ───────────────────────────────
+    // ── Editor gizmo: shows drone anchor in scene view ────────
     void OnDrawGizmos()
     {
-        Gizmos.color = _slamTracking
-            ? Color.green : Color.red;
-        Gizmos.DrawWireSphere(worldOrigin, 0.1f);
+        Gizmos.color = Color.cyan;
+        Gizmos.DrawWireSphere(droneWorldPosition, 0.15f);
         Gizmos.DrawLine(
-            worldOrigin,
-            worldOrigin + Vector3.up * 0.3f);
+            droneWorldPosition,
+            droneWorldPosition + Vector3.up * 0.4f);
+        Gizmos.color = Color.white;
+        Gizmos.DrawWireSphere(worldOrigin, 0.08f);
     }
 }
