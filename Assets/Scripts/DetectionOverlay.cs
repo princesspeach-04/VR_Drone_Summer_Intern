@@ -10,9 +10,7 @@ public class Detection
     public string label;
     public int x1, y1, x2, y2;
     public float depth_m;
-    public float world_x;
-    public float world_y;
-    public float world_z;
+    public float world_x, world_y, world_z;
     public bool tracking;
 }
 
@@ -25,13 +23,13 @@ public class DetectionResponse
 public class DetectionOverlay : MonoBehaviour
 {
     [Header("Network")]
-    public string jetsonHostname = "100.116.179.56";
+    public string jetsonHostname = "100.94.87.80";
     public int jetsonPort = 8080;
     public float pollInterval = 0.15f;
 
     [Header("Stream resolution (must match Python)")]
-    public int streamWidth = 512;
-    public int streamHeight = 288;
+    public int streamWidth = 640;
+    public int streamHeight = 360;
 
     [Header("Scene refs")]
     public Renderer videoScreen;
@@ -40,32 +38,37 @@ public class DetectionOverlay : MonoBehaviour
     [Header("Through-Wall Marker")]
     public GameObject markerPrefab;
 
-    [Tooltip("Metres from headset room origin to drone. " +
-             "Z = forward, Y = height, X = left/right.")]
-    public Vector3 droneWorldPosition = new Vector3(0f, 1.2f, 3f);
+    [Header("Camera FOV (degrees) — match A8 mini lens")]
+    public float cameraHFov = 90f;   // horizontal FOV of A8 mini
+    public float cameraVFov = 60f;   // vertical FOV
 
     [Header("Smoothing")]
     public float smoothSpeed = 5f;
 
-    // ── internals ─────────────────────────────────────────────
+    // ── internals ──────────────────────────────────────────
     private Dictionary<int, GameObject> _pool
         = new Dictionary<int, GameObject>();
     private Dictionary<int, ThroughWallMarker> _markerPool
         = new Dictionary<int, ThroughWallMarker>();
+    private Dictionary<int, Vector3> _smoothedPositions
+        = new Dictionary<int, Vector3>();
 
     private bool _passthroughMode = false;
     private bool _lastPollFailed = false;
+    private Camera _headsetCam;
 
-    // ─────────────────────────────────────────────────────────
     void Start()
     {
+        // Always start in passthrough mode
+        _passthroughMode = true;
+
+        _headsetCam = Camera.main;
+
         Debug.Log("[DetectionOverlay] Start — " +
-                  $"markerPrefab={(markerPrefab == null ? " NULL" : "OK")}" +
-                  $" dronePos={droneWorldPosition}");
+                  $"markerPrefab={(markerPrefab == null ? "NULL" : "OK")}");
         StartCoroutine(PollLoop());
     }
 
-    // ── Called by ModeManager ─────────────────────────────────
     public void SetPassthroughMode(bool passthrough)
     {
         _passthroughMode = passthrough;
@@ -84,11 +87,9 @@ public class DetectionOverlay : MonoBehaviour
         }
     }
 
-    // ── Polling ───────────────────────────────────────────────
     IEnumerator PollLoop()
     {
-        string url =
-            $"http://{jetsonHostname}:{jetsonPort}/detections";
+        string url = $"http://{jetsonHostname}:{jetsonPort}/detections";
 
         while (true)
         {
@@ -96,29 +97,24 @@ public class DetectionOverlay : MonoBehaviour
             req.timeout = 2;
             yield return req.SendWebRequest();
 
-            if (req.result ==
-                UnityWebRequest.Result.Success)
+            if (req.result == UnityWebRequest.Result.Success)
             {
                 _lastPollFailed = false;
-                var data =
-                    JsonUtility.FromJson<DetectionResponse>(
-                        req.downloadHandler.text);
+                var data = JsonUtility.FromJson<DetectionResponse>(
+                    req.downloadHandler.text);
 
                 if (data?.detections != null)
                 {
-                    Debug.Log(
-                        $"[DetectionOverlay] Got " +
-                        $"{data.detections.Count} detections" +
-                        $" | passthrough={_passthroughMode}");
+                    Debug.Log($"[DetectionOverlay] Got " +
+                              $"{data.detections.Count} detections" +
+                              $" | passthrough={_passthroughMode}");
                     UpdateOverlay(data.detections);
                 }
             }
             else
             {
                 if (!_lastPollFailed)
-                    Debug.LogWarning(
-                        "[DetectionOverlay] Poll failed: " +
-                        req.error);
+                    Debug.LogWarning("[DetectionOverlay] Poll failed: " + req.error);
                 _lastPollFailed = true;
                 HideAll();
             }
@@ -127,7 +123,6 @@ public class DetectionOverlay : MonoBehaviour
         }
     }
 
-    // ── Route ─────────────────────────────────────────────────
     void UpdateOverlay(List<Detection> detections)
     {
         if (_passthroughMode)
@@ -136,7 +131,96 @@ public class DetectionOverlay : MonoBehaviour
             UpdateLabels(detections);
     }
 
-    // ── Camera-feed: 2D labels on video quad ──────────────────
+    // ── Passthrough: place marker in world space ───────────
+    void UpdateMarkers(List<Detection> detections)
+    {
+        if (markerPrefab == null)
+        {
+            Debug.LogError("[DetectionOverlay] markerPrefab is NULL!");
+            return;
+        }
+
+        if (_headsetCam == null)
+            _headsetCam = Camera.main;
+
+        for (int i = 0; i < detections.Count; i++)
+        {
+            var det = detections[i];
+
+            // Centre pixel of bounding box
+            float cx = (det.x1 + det.x2) * 0.5f;
+            float cy = (det.y1 + det.y2) * 0.5f;
+
+            // Normalised -0.5..+0.5
+            float nx = (cx / streamWidth) - 0.5f;
+            float ny = (cy / streamHeight) - 0.5f;   // +y = down in image
+
+            // Convert pixel offset to angles
+            float yawOffset = nx * cameraHFov;    // left/right
+            float pitchOffset = -ny * cameraVFov;    // up/down (flip Y)
+
+            // Build a direction from headset forward + those offsets
+            // We rotate the headset's forward vector by these angles
+            Quaternion rot = _headsetCam.transform.rotation
+                * Quaternion.Euler(-pitchOffset, yawOffset, 0f);
+            Vector3 dir = rot * Vector3.forward;
+
+            // Place marker at detected depth, or 2m fallback
+            float dist = (det.depth_m > 0.1f && det.depth_m < 20f)
+                ? det.depth_m : 2.0f;
+
+            Vector3 rawTarget = _headsetCam.transform.position
+                              + dir * dist;
+
+            // Lift label slightly above centre of bounding box
+            // (move it toward the top of the box in view space)
+            float topNy = (det.y1 / (float)streamHeight) - 0.5f;
+            float topPitch = -topNy * cameraVFov;
+            Quaternion topRot = _headsetCam.transform.rotation
+                * Quaternion.Euler(-topPitch, yawOffset, 0f);
+            Vector3 topDir = topRot * Vector3.forward;
+            Vector3 topTarget = _headsetCam.transform.position
+                              + topDir * dist
+                              + Vector3.up * 0.15f;   // extra nudge up
+
+            // Smooth position
+            if (!_smoothedPositions.ContainsKey(i))
+                _smoothedPositions[i] = topTarget;
+
+            _smoothedPositions[i] = Vector3.Lerp(
+                _smoothedPositions[i],
+                topTarget,
+                Time.deltaTime * smoothSpeed);
+
+            // Get or create marker
+            if (!_markerPool.ContainsKey(i) || _markerPool[i] == null)
+            {
+                var go = Instantiate(markerPrefab, transform);
+                _markerPool[i] = go.GetComponent<ThroughWallMarker>();
+
+                if (_markerPool[i] == null)
+                {
+                    Debug.LogError("[DetectionOverlay] ThroughWallMarker component missing!");
+                    continue;
+                }
+            }
+
+            string className = det.label.Split(' ')[0];
+
+            Debug.Log($"[DetectionOverlay] Marker {i} → " +
+                      $"{className} depth={det.depth_m}m " +
+                      $"pos={_smoothedPositions[i]}");
+
+            _markerPool[i].SetData(className, det.depth_m, _smoothedPositions[i]);
+        }
+
+        // Hide unused markers
+        for (int i = detections.Count; i < _markerPool.Count; i++)
+            if (_markerPool.ContainsKey(i) && _markerPool[i] != null)
+                _markerPool[i].Hide();
+    }
+
+    // ── Camera feed: 2D labels on video quad ───────────────
     void UpdateLabels(List<Detection> detections)
     {
         for (int i = 0; i < detections.Count; i++)
@@ -148,8 +232,7 @@ public class DetectionOverlay : MonoBehaviour
             var det = detections[i];
             go.SetActive(true);
 
-            var tmp =
-                go.GetComponentInChildren<TextMeshProUGUI>();
+            var tmp = go.GetComponentInChildren<TextMeshProUGUI>();
             if (tmp != null)
             {
                 tmp.text = det.label;
@@ -171,60 +254,6 @@ public class DetectionOverlay : MonoBehaviour
                 _pool[i].SetActive(false);
     }
 
-    // ── Passthrough: through-wall marker ─────────────────────
-    void UpdateMarkers(List<Detection> detections)
-    {
-        if (markerPrefab == null)
-        {
-            Debug.LogError(
-                "[DetectionOverlay] markerPrefab is NULL — " +
-                "assign ThroughWallMarkerPrefab in Inspector");
-            return;
-        }
-
-        for (int i = 0; i < detections.Count; i++)
-        {
-            if (!_markerPool.ContainsKey(i) ||
-                _markerPool[i] == null)
-            {
-                var go = Instantiate(markerPrefab, transform);
-                _markerPool[i] =
-                    go.GetComponent<ThroughWallMarker>();
-
-                if (_markerPool[i] == null)
-                {
-                    Debug.LogError(
-                        "[DetectionOverlay] markerPrefab has " +
-                        "no ThroughWallMarker component!");
-                    continue;
-                }
-            }
-
-            var marker = _markerPool[i];
-            var det = detections[i];
-
-            string className = det.label.Split(' ')[0];
-
-            // Stack multiple detections vertically
-            Vector3 pos = droneWorldPosition +
-                          Vector3.up * (i * 0.4f);
-
-            Debug.Log(
-                $"[DetectionOverlay] Marker {i} → " +
-                $"{className} depth={det.depth_m}m " +
-                $"pos={pos}");
-
-            marker.SetData(className, det.depth_m, pos);
-        }
-
-        for (int i = detections.Count;
-             i < _markerPool.Count; i++)
-            if (_markerPool.ContainsKey(i) &&
-                _markerPool[i] != null)
-                _markerPool[i].Hide();
-    }
-
-    // ── Pixel → world on video quad ──────────────────────────
     Vector3 PixelToWorld(float u, float v, int pixelY)
     {
         if (videoScreen == null) return Vector3.zero;
@@ -237,7 +266,6 @@ public class DetectionOverlay : MonoBehaviour
         return new Vector3(x, y, z);
     }
 
-    // ── Hide all ──────────────────────────────────────────────
     void HideAll()
     {
         foreach (var go in _pool.Values)
@@ -246,13 +274,9 @@ public class DetectionOverlay : MonoBehaviour
             if (m != null) m.Hide();
     }
 
-    // ── Scene view gizmo — shows drone anchor ────────────────
     void OnDrawGizmos()
     {
-        // Cyan sphere at drone position
         Gizmos.color = Color.cyan;
-        Gizmos.DrawWireSphere(droneWorldPosition, 0.2f);
-        Gizmos.DrawLine(droneWorldPosition,
-            droneWorldPosition + Vector3.up * 0.5f);
+        Gizmos.DrawWireSphere(transform.position, 0.1f);
     }
 }

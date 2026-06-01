@@ -29,10 +29,13 @@ public class ThroughWallMarker : MonoBehaviour
     {
         if (!_active) return;
 
-        // Billboard: always face the headset camera
-        if (_cam != null)
-            transform.rotation = Quaternion.LookRotation(
-                transform.position - _cam.transform.position);
+        // Refresh camera ref if lost (after scene load etc.)
+        if (_cam == null) _cam = Camera.main;
+        if (_cam == null) return;
+
+        // Billboard: face TOWARD the camera (was reversed before)
+        transform.rotation = Quaternion.LookRotation(
+            _cam.transform.position - transform.position);
 
         // Pulse scale
         float s = Mathf.Lerp(
@@ -40,14 +43,13 @@ public class ThroughWallMarker : MonoBehaviour
             (Mathf.Sin(Time.time * pulseSpeed) + 1f) * 0.5f);
         transform.localScale = _baseScale * s;
 
-        // Fade to stale colour if no update for 1 s
+        // Fade to stale colour after 1s without update
         _timeSinceUpdate += Time.deltaTime;
         if (labelText != null)
             labelText.color =
                 _timeSinceUpdate > 1f ? staleColor : activeColor;
     }
 
-    /// <summary>Called every poll cycle by DetectionOverlay.</summary>
     public void SetData(string className,
                         float depthMeters,
                         Vector3 worldPosition)
@@ -59,19 +61,16 @@ public class ThroughWallMarker : MonoBehaviour
         if (labelText != null)
         {
             string dist = depthMeters > 0
-                ? $"{depthMeters:0.0} m"
-                : "-- m";
+                ? $"{depthMeters:0.0} m" : "-- m";
             labelText.text = $"{className}\n{dist}";
             labelText.color = activeColor;
         }
 
-        // Vertical drop-line to ground (optional)
         if (lineToGround != null)
         {
             lineToGround.SetPosition(0, worldPosition);
             lineToGround.SetPosition(1,
-                new Vector3(worldPosition.x, 0f,
-                            worldPosition.z));
+                new Vector3(worldPosition.x, 0f, worldPosition.z));
         }
 
         gameObject.SetActive(true);
