@@ -11,10 +11,7 @@ public class ModeManager : MonoBehaviour
     public OVRPassthroughLayer passthroughLayer;
     public Camera mainCamera;
     public DetectionOverlay detectionOverlay;
-
-    [Header("Stream")]
-    public string jetsonHostname = "100.116.179.56";
-    public int jetsonPort = 8080;
+    public MJPEGStream mjpegStream;
 
     [Header("Controller Button")]
     public OVRInput.Button toggleButton = OVRInput.Button.One;
@@ -24,27 +21,12 @@ public class ModeManager : MonoBehaviour
 
     public bool IsPassthrough { get; private set; } = false;
 
-    // ── Stream internals ──────────────────────────────────────
-    private Renderer _quadRenderer;
-    private Texture2D _texture;
-    private Coroutine _streamCoroutine;
-    private bool _streamRunning = false;
-    private string _streamUrl;
-
-    // ─────────────────────────────────────────────────────────
     void Start()
     {
-        _streamUrl = $"http://{jetsonHostname}:{jetsonPort}/stream";
-
-        if (videoScreenQuad != null)
-        {
-            _quadRenderer = videoScreenQuad
-                                .GetComponent<Renderer>();
-            _texture = new Texture2D(
-                                2, 2,
-                                TextureFormat.RGB24,
-                                false);
-        }
+        // Auto-find MJPEGStream if not assigned
+        if (mjpegStream == null && videoScreenQuad != null)
+            mjpegStream =
+                videoScreenQuad.GetComponent<MJPEGStream>();
 
         if (passthroughLayer != null)
             passthroughLayer.enabled = false;
@@ -67,15 +49,20 @@ public class ModeManager : MonoBehaviour
 
     void Apply()
     {
+        AndroidLog("ModeManager",
+            "Apply mode = " +
+            (IsPassthrough ? "PASSTHROUGH" : "CAMERA FEED"));
+
         // ── Video quad ───────────────────────────────────────
         if (videoScreenQuad != null)
         {
             videoScreenQuad.SetActive(!IsPassthrough);
 
-            if (!IsPassthrough)
-                RestartStream();
-            else
-                StopStream();
+            if (!IsPassthrough && mjpegStream != null)
+            {
+                // Re-enable quad first, then restart stream
+                StartCoroutine(RestartStreamDelayed());
+            }
         }
 
         // ── Passthrough layer ────────────────────────────────
@@ -106,131 +93,16 @@ public class ModeManager : MonoBehaviour
                 IsPassthrough);
 
         UpdateUILabel();
-
-        Debug.Log("[ModeManager] Mode = " +
-            (IsPassthrough
-                ? "PASSTHROUGH"
-                : "CAMERA FEED"));
     }
 
-    // ── Stream control ────────────────────────────────────────
-    void RestartStream()
+    IEnumerator RestartStreamDelayed()
     {
-        StopStream();
-        StartCoroutine(DelayedStreamStart(0.2f));
+        yield return new WaitForSeconds(0.3f);
+        AndroidLog("ModeManager",
+            "Restarting MJPEGStream...");
+        mjpegStream.RestartStream();
     }
 
-    IEnumerator DelayedStreamStart(float delay)
-    {
-        yield return new WaitForSeconds(delay);
-        StartStream();
-    }
-
-    void StartStream()
-    {
-        if (_streamRunning) return;
-        _streamRunning = true;
-        _streamCoroutine = StartCoroutine(StreamLoop());
-        Debug.Log($"[Stream] Started → {_streamUrl}");
-    }
-
-    void StopStream()
-    {
-        _streamRunning = false;
-        if (_streamCoroutine != null)
-        {
-            StopCoroutine(_streamCoroutine);
-            _streamCoroutine = null;
-        }
-        Debug.Log("[Stream] Stopped");
-    }
-
-    IEnumerator StreamLoop()
-    {
-        while (_streamRunning)
-        {
-            using var req = UnityWebRequest.Get(_streamUrl);
-            req.timeout = 5;
-            req.downloadHandler = new DownloadHandlerBuffer();
-            req.SendWebRequest();
-
-            var buffer = new List<byte>();
-            bool inJpeg = false;
-
-            while (!req.isDone && _streamRunning)
-            {
-                if (req.result ==
-                        UnityWebRequest.Result
-                            .ConnectionError ||
-                    req.result ==
-                        UnityWebRequest.Result
-                            .ProtocolError)
-                {
-                    Debug.LogWarning(
-                        "[Stream] Error: " + req.error);
-                    break;
-                }
-
-                byte[] data = req.downloadHandler.data;
-                if (data == null || data.Length == 0)
-                {
-                    yield return null;
-                    continue;
-                }
-
-                // Parse JPEG frames from MJPEG stream
-                // by looking for FF D8 (start)
-                // and FF D9 (end) markers
-                for (int i = 0;
-                     i < data.Length - 1; i++)
-                {
-                    if (!inJpeg &&
-                        data[i] == 0xFF &&
-                        data[i + 1] == 0xD8)
-                    {
-                        buffer.Clear();
-                        inJpeg = true;
-                    }
-
-                    if (inJpeg)
-                    {
-                        buffer.Add(data[i]);
-
-                        if (data[i] == 0xFF &&
-                            data[i + 1] == 0xD9)
-                        {
-                            buffer.Add(data[i + 1]);
-                            ApplyFrame(buffer.ToArray());
-                            buffer.Clear();
-                            inJpeg = false;
-                            i++;
-                        }
-                    }
-                }
-
-                yield return null;
-            }
-
-            if (_streamRunning)
-            {
-                Debug.LogWarning(
-                    "[Stream] Dropped — retrying in 1s");
-                yield return new WaitForSeconds(1f);
-            }
-        }
-    }
-
-    void ApplyFrame(byte[] jpegBytes)
-    {
-        if (_quadRenderer == null ||
-            jpegBytes == null ||
-            jpegBytes.Length == 0) return;
-
-        if (_texture.LoadImage(jpegBytes))
-            _quadRenderer.material.mainTexture = _texture;
-    }
-
-    // ── UI ────────────────────────────────────────────────────
     void UpdateUILabel()
     {
         if (uiButtonLabel == null) return;
@@ -239,11 +111,21 @@ public class ModeManager : MonoBehaviour
             : "Switch to Passthrough";
     }
 
-    // ── Cleanup ───────────────────────────────────────────────
-    void OnDestroy()
+    // ── Android logcat helper ────────────────────────────────
+    public static void AndroidLog(string tag, string msg)
     {
-        StopStream();
-        if (_texture != null)
-            Destroy(_texture);
+        Debug.Log($"[{tag}] {msg}");
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+        try
+        {
+            using var logClass =
+                new AndroidJavaClass(
+                    "android.util.Log");
+            logClass.CallStatic<int>(
+                "d", tag, msg);
+        }
+        catch { }
+#endif
     }
 }
