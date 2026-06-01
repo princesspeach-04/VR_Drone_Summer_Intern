@@ -898,8 +898,8 @@ MonoBehaviour:
   jetsonHostname: 100.94.87.80
   jetsonPort: 8080
   pollInterval: 0.15
-  streamWidth: 512
-  streamHeight: 288
+  streamWidth: 640
+  streamHeight: 360
   videoScreen: {fileID: 1429373123}
   labelPrefab: {fileID: 1638843304407069138, guid: 41b9c6b595c8c1545b83feb5de3b1d87, type: 3}
   markerPrefab: {fileID: 165506206939803269, guid: 7bcc86b31fbb6dd46b7704832077f026, type: 3}

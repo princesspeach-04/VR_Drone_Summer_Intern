@@ -28,8 +28,8 @@ public class DetectionOverlay : MonoBehaviour
     public float pollInterval = 0.15f;
 
     [Header("Stream resolution (must match Python)")]
-    public int streamWidth = 640;
-    public int streamHeight = 360;
+    public int streamWidth = 640;   // FIXED: was 512
+    public int streamHeight = 360;  // FIXED: was 288
 
     [Header("Scene refs")]
     public Renderer videoScreen;
@@ -39,11 +39,14 @@ public class DetectionOverlay : MonoBehaviour
     public GameObject markerPrefab;
 
     [Header("Camera FOV (degrees) — match A8 mini lens")]
-    public float cameraHFov = 90f;   // horizontal FOV of A8 mini
-    public float cameraVFov = 60f;   // vertical FOV
+    public float cameraHFov = 90f;
+    public float cameraVFov = 60f;
 
     [Header("Smoothing")]
     public float smoothSpeed = 5f;
+
+    [Header("Snap threshold (metres) — teleport instead of lerp if marker jumps farther than this")]
+    public float snapThreshold = 3f;
 
     // ── internals ──────────────────────────────────────────
     private Dictionary<int, GameObject> _pool
@@ -59,13 +62,12 @@ public class DetectionOverlay : MonoBehaviour
 
     void Start()
     {
-        // Always start in passthrough mode
         _passthroughMode = true;
-
         _headsetCam = Camera.main;
 
         Debug.Log("[DetectionOverlay] Start — " +
-                  $"markerPrefab={(markerPrefab == null ? "NULL" : "OK")}");
+                  $"markerPrefab={(markerPrefab == null ? "NULL" : "OK")} " +
+                  $"stream={streamWidth}x{streamHeight}");
         StartCoroutine(PollLoop());
     }
 
@@ -151,46 +153,50 @@ public class DetectionOverlay : MonoBehaviour
             float cx = (det.x1 + det.x2) * 0.5f;
             float cy = (det.y1 + det.y2) * 0.5f;
 
-            // Normalised -0.5..+0.5
+            // Normalised -0.5..+0.5  (uses corrected streamWidth/Height)
             float nx = (cx / streamWidth) - 0.5f;
             float ny = (cy / streamHeight) - 0.5f;   // +y = down in image
 
             // Convert pixel offset to angles
-            float yawOffset = nx * cameraHFov;    // left/right
-            float pitchOffset = -ny * cameraVFov;    // up/down (flip Y)
+            float yawOffset = nx * cameraHFov;
+            float pitchOffset = -ny * cameraVFov;    // flip Y: down-in-image = negative pitch
 
-            // Build a direction from headset forward + those offsets
-            // We rotate the headset's forward vector by these angles
+            // Build direction from headset forward + those offsets
             Quaternion rot = _headsetCam.transform.rotation
-                * Quaternion.Euler(-pitchOffset, yawOffset, 0f);
+                           * Quaternion.Euler(-pitchOffset, yawOffset, 0f);
             Vector3 dir = rot * Vector3.forward;
 
-            // Place marker at detected depth, or 2m fallback
+            // Place marker at detected depth, or 2 m fallback
             float dist = (det.depth_m > 0.1f && det.depth_m < 20f)
                 ? det.depth_m : 2.0f;
 
-            Vector3 rawTarget = _headsetCam.transform.position
-                              + dir * dist;
-
-            // Lift label slightly above centre of bounding box
-            // (move it toward the top of the box in view space)
+            // Lift label to top edge of bounding box + a small nudge upward
             float topNy = (det.y1 / (float)streamHeight) - 0.5f;
             float topPitch = -topNy * cameraVFov;
             Quaternion topRot = _headsetCam.transform.rotation
-                * Quaternion.Euler(-topPitch, yawOffset, 0f);
+                              * Quaternion.Euler(-topPitch, yawOffset, 0f);
             Vector3 topDir = topRot * Vector3.forward;
             Vector3 topTarget = _headsetCam.transform.position
                               + topDir * dist
-                              + Vector3.up * 0.15f;   // extra nudge up
+                              + Vector3.up * 0.15f;
 
-            // Smooth position
-            if (!_smoothedPositions.ContainsKey(i))
+            // ── FIXED smoothing: snap on first appearance or large jump ──
+            bool isNew = !_smoothedPositions.ContainsKey(i);
+            float jump = isNew ? 0f
+                                : Vector3.Distance(_smoothedPositions[i], topTarget);
+
+            if (isNew || jump > snapThreshold)
+            {
+                // Teleport — don't lerp from (0,0,0) or a stale position
                 _smoothedPositions[i] = topTarget;
-
-            _smoothedPositions[i] = Vector3.Lerp(
-                _smoothedPositions[i],
-                topTarget,
-                Time.deltaTime * smoothSpeed);
+            }
+            else
+            {
+                _smoothedPositions[i] = Vector3.Lerp(
+                    _smoothedPositions[i],
+                    topTarget,
+                    Time.deltaTime * smoothSpeed);
+            }
 
             // Get or create marker
             if (!_markerPool.ContainsKey(i) || _markerPool[i] == null)
@@ -208,7 +214,7 @@ public class DetectionOverlay : MonoBehaviour
             string className = det.label.Split(' ')[0];
 
             Debug.Log($"[DetectionOverlay] Marker {i} → " +
-                      $"{className} depth={det.depth_m}m " +
+                      $"{className} depth={det.depth_m:F2}m " +
                       $"pos={_smoothedPositions[i]}");
 
             _markerPool[i].SetData(className, det.depth_m, _smoothedPositions[i]);
