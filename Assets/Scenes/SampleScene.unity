@@ -906,6 +906,8 @@ MonoBehaviour:
   cameraHFov: 90
   cameraVFov: 60
   smoothSpeed: 5
+  snapThreshold: 3
+  markerYOffset: 0.2
 --- !u!4 &1742675980
 Transform:
   m_ObjectHideFlags: 0
