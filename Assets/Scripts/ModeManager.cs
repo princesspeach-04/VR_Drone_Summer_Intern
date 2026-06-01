@@ -22,14 +22,11 @@ public class ModeManager : MonoBehaviour
     private const float TOGGLE_COOLDOWN = 1.0f;
     private float _lastToggleTime = -99f;
 
-    public bool IsPassthrough { get; private set; } = false;
+    public bool IsPassthrough { get; private set; } = true;  // start in passthrough
 
-    // We keep the quad ALWAYS active —
-    // just swap its material between
-    // visible and invisible
     private Renderer _quadRenderer;
     private Material _visibleMat;
-    private Material _hiddenMat;      // fully transparent
+    private Material _hiddenMat;   // fully transparent — keeps stream alive
     private MJPEGStream _mjpeg;
 
     void Start()
@@ -38,35 +35,31 @@ public class ModeManager : MonoBehaviour
 
         if (videoScreenQuad != null)
         {
-            _quadRenderer = videoScreenQuad
-                                .GetComponent<Renderer>();
-            _mjpeg = videoScreenQuad
-                                .GetComponent<MJPEGStream>();
+            _quadRenderer = videoScreenQuad.GetComponent<Renderer>();
+            _mjpeg = videoScreenQuad.GetComponent<MJPEGStream>();
 
             if (_quadRenderer != null)
             {
-                // Cache the original visible material
                 _visibleMat = _quadRenderer.material;
 
-                // Create a fully transparent material
-                // for hiding the quad without disabling it
+                // Transparent clone — hides quad WITHOUT disabling it so
+                // the MJPEG stream keeps decoding in the background.
                 _hiddenMat = new Material(_visibleMat);
                 _hiddenMat.color = new Color(0, 0, 0, 0);
-
-                // Use URP transparent shader if available
                 _hiddenMat.SetFloat("_Surface", 1);
                 _hiddenMat.SetFloat("_Blend", 0);
                 _hiddenMat.renderQueue = 3000;
             }
 
-            ALog("ModeManager",
-                 $"MJPEG found: {(_mjpeg != null ? "YES" : "NO")}");
+            ALog("ModeManager", $"MJPEG found: {(_mjpeg != null ? "YES" : "NO")}");
         }
 
         if (passthroughLayer != null)
             passthroughLayer.enabled = false;
 
-        // Start in passthrough mode
+        // ── Start in PASSTHROUGH mode ──────────────────────────────────────
+        // DetectionOverlay.Start() also defaults to passthrough=true,
+        // so both scripts agree from the very first frame.
         IsPassthrough = true;
         ApplyMode();
         UpdateUILabel();
@@ -79,8 +72,7 @@ public class ModeManager : MonoBehaviour
             float now = Time.time;
             if (now - _lastToggleTime < TOGGLE_COOLDOWN)
             {
-                ALog("ModeManager",
-                     "Toggle ignored — cooldown");
+                ALog("ModeManager", "Toggle ignored — cooldown");
                 return;
             }
             _lastToggleTime = now;
@@ -91,8 +83,7 @@ public class ModeManager : MonoBehaviour
     public void Toggle()
     {
         IsPassthrough = !IsPassthrough;
-        ALog("ModeManager",
-             $"Toggle → {(IsPassthrough ? "PASSTHROUGH" : "CAMERA FEED")}");
+        ALog("ModeManager", $"Toggle → {(IsPassthrough ? "PASSTHROUGH" : "CAMERA FEED")}");
         ApplyMode();
     }
 
@@ -103,9 +94,10 @@ public class ModeManager : MonoBehaviour
         else
             EnterCameraFeed();
 
+        // Keep DetectionOverlay in sync so it routes to
+        // UpdateMarkers (passthrough) or UpdateLabels (camera feed)
         if (detectionOverlay != null)
-            detectionOverlay.SetPassthroughMode(
-                IsPassthrough);
+            detectionOverlay.SetPassthroughMode(IsPassthrough);
 
         UpdateUILabel();
     }
@@ -114,8 +106,7 @@ public class ModeManager : MonoBehaviour
     {
         ALog("ModeManager", "EnterPassthrough");
 
-        // Hide quad by making it transparent
-        // — DO NOT disable it so stream keeps running
+        // Hide quad visually but keep it alive for the stream
         if (_quadRenderer != null && _hiddenMat != null)
             _quadRenderer.material = _hiddenMat;
 
@@ -124,10 +115,8 @@ public class ModeManager : MonoBehaviour
 
         if (mainCamera != null)
         {
-            mainCamera.clearFlags =
-                CameraClearFlags.SolidColor;
-            mainCamera.backgroundColor =
-                new Color(0, 0, 0, 0);
+            mainCamera.clearFlags = CameraClearFlags.SolidColor;
+            mainCamera.backgroundColor = new Color(0, 0, 0, 0);
         }
     }
 
@@ -144,18 +133,15 @@ public class ModeManager : MonoBehaviour
 
         if (mainCamera != null)
         {
-            mainCamera.clearFlags =
-                CameraClearFlags.SolidColor;
+            mainCamera.clearFlags = CameraClearFlags.SolidColor;
             mainCamera.backgroundColor = Color.black;
         }
 
-        // Stream is still running since quad was
-        // never disabled — but reassign texture
-        // just in case material swap lost it
+        // Stream was never paused, but reassign texture in case the
+        // material swap lost the reference.
         if (_mjpeg != null)
         {
-            ALog("ModeManager",
-                 "Reassigning stream texture");
+            ALog("ModeManager", "Reassigning stream texture");
             _mjpeg.ReassignTexture();
         }
     }
@@ -174,8 +160,7 @@ public class ModeManager : MonoBehaviour
 #if UNITY_ANDROID && !UNITY_EDITOR
         try
         {
-            using var c = new AndroidJavaClass(
-                "android.util.Log");
+            using var c = new AndroidJavaClass("android.util.Log");
             c.CallStatic<int>("d", tag, msg);
         }
         catch { }

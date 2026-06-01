@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 using TMPro;
 
 public class ThroughWallMarker : MonoBehaviour
@@ -29,13 +29,16 @@ public class ThroughWallMarker : MonoBehaviour
     {
         if (!_active) return;
 
-        // Refresh camera ref if lost (after scene load etc.)
+        // Refresh camera ref if lost (e.g. after scene reload)
         if (_cam == null) _cam = Camera.main;
         if (_cam == null) return;
 
-        // Billboard: face TOWARD the camera (was reversed before)
+        // ── FIX: Billboard faces AWAY from camera so the canvas normal
+        //    points toward the viewer and text is readable.
+        //    LookRotation(cam - self)  →  forward points AT camera  →  back-face shown
+        //    LookRotation(self - cam)  →  forward points AWAY       →  front-face shown ✓
         transform.rotation = Quaternion.LookRotation(
-            _cam.transform.position - transform.position);
+            transform.position - _cam.transform.position);
 
         // Pulse scale
         float s = Mathf.Lerp(
@@ -43,16 +46,13 @@ public class ThroughWallMarker : MonoBehaviour
             (Mathf.Sin(Time.time * pulseSpeed) + 1f) * 0.5f);
         transform.localScale = _baseScale * s;
 
-        // Fade to stale colour after 1s without update
+        // Fade to stale colour after 1 s without an update
         _timeSinceUpdate += Time.deltaTime;
         if (labelText != null)
-            labelText.color =
-                _timeSinceUpdate > 1f ? staleColor : activeColor;
+            labelText.color = _timeSinceUpdate > 1f ? staleColor : activeColor;
     }
 
-    public void SetData(string className,
-                        float depthMeters,
-                        Vector3 worldPosition)
+    public void SetData(string className, float depthMeters, Vector3 worldPosition)
     {
         transform.position = worldPosition;
         _timeSinceUpdate = 0f;
@@ -60,8 +60,7 @@ public class ThroughWallMarker : MonoBehaviour
 
         if (labelText != null)
         {
-            string dist = depthMeters > 0
-                ? $"{depthMeters:0.0} m" : "-- m";
+            string dist = depthMeters > 0f ? $"{depthMeters:0.0} m" : "-- m";
             labelText.text = $"{className}\n{dist}";
             labelText.color = activeColor;
         }

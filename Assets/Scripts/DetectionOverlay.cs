@@ -42,14 +42,19 @@ public class DetectionOverlay : MonoBehaviour
     public float cameraHFov = 90f;
     public float cameraVFov = 60f;
 
-    [Header("Marker Y Offset above eye level (metres)")]
+    [Header("World Position")]
+    [Tooltip("Y height of the floor in Unity world space. Set to 0 if your floor is at origin.")]
+    public float floorY = 0f;
+    [Tooltip("How high above the floor to place markers (metres). ~1.2 = chest height.")]
+    public float markerHeightAboveFloor = 1.2f;
+    [Tooltip("Additional Y offset on top of floor + height.")]
     public float markerYOffset = 0.2f;
 
     // ── internals ──────────────────────────────────────────
     private Dictionary<int, GameObject> _pool = new Dictionary<int, GameObject>();
     private Dictionary<int, ThroughWallMarker> _markerPool = new Dictionary<int, ThroughWallMarker>();
 
-    private bool _passthroughMode = false;
+    private bool _passthroughMode = true;   // default TRUE — must match ModeManager
     private bool _lastPollFailed = false;
     private Camera _headsetCam;
 
@@ -57,7 +62,7 @@ public class DetectionOverlay : MonoBehaviour
     {
         _passthroughMode = true;
         _headsetCam = Camera.main;
-        Debug.Log("[DetectionOverlay] Start — " +
+        Debug.Log("[DetectionOverlay] Start — passthrough=TRUE " +
                   $"markerPrefab={(markerPrefab == null ? "NULL" : "OK")} " +
                   $"stream={streamWidth}x{streamHeight}");
         StartCoroutine(PollLoop());
@@ -66,15 +71,17 @@ public class DetectionOverlay : MonoBehaviour
     public void SetPassthroughMode(bool passthrough)
     {
         _passthroughMode = passthrough;
-        Debug.Log("[DetectionOverlay] Mode → " + (passthrough ? "PASSTHROUGH" : "CAMERA FEED"));
+        Debug.Log("[DetectionOverlay] SetPassthroughMode → " + (passthrough ? "PASSTHROUGH" : "CAMERA FEED"));
 
         if (_passthroughMode)
         {
+            // Entering passthrough: hide 2D labels, show 3D markers
             foreach (var go in _pool.Values)
                 if (go != null) go.SetActive(false);
         }
         else
         {
+            // Entering camera feed: hide 3D markers, show 2D labels
             foreach (var m in _markerPool.Values)
                 if (m != null) m.Hide();
         }
@@ -114,37 +121,38 @@ public class DetectionOverlay : MonoBehaviour
 
     void UpdateOverlay(List<Detection> detections)
     {
+        // Passthrough mode → 3D world-space markers (visible through walls via OVR)
+        // Camera feed mode → 2D labels overlaid on the video quad
         if (_passthroughMode)
             UpdateMarkers(detections);
         else
             UpdateLabels(detections);
     }
 
-    // ── YAW-ONLY direction — camera pitch is completely stripped ──────────
-    // TransformDirection keeps pitch, which tilts the ray downward when the
-    // user looks slightly down and walks Z (and Y) far from origin.
-    // We only want LEFT/RIGHT spread from horizontal FOV; Y is pinned below.
+    // ── YAW-ONLY direction — strips camera pitch completely ──────────────────
+    // Using only yaw prevents the ray from tilting downward when the user looks
+    // slightly down, which was causing markers to drift in Z and then in Y.
     Vector3 PixelToWorldDirection(float pixelX)
     {
         float nx = (pixelX / streamWidth) - 0.5f;                    // -0.5..+0.5
         float tanH = Mathf.Tan(cameraHFov * 0.5f * Mathf.Deg2Rad);
 
-        // Build a FLAT rotation using only the headset's yaw
+        // Only use the headset's yaw — no pitch, no roll
         float yaw = _headsetCam.transform.eulerAngles.y;
         Quaternion yawOnly = Quaternion.Euler(0f, yaw, 0f);
 
-        Vector3 flatForward = yawOnly * Vector3.forward;   // no pitch, no roll
+        Vector3 flatForward = yawOnly * Vector3.forward;
         Vector3 flatRight = yawOnly * Vector3.right;
 
-        // Horizontal spread only; result is always a flat world-space vector
         return (flatForward + flatRight * (nx * 2f * tanH)).normalized;
     }
 
+    // ── Passthrough: 3D world-space markers ─────────────────────────────────
     void UpdateMarkers(List<Detection> detections)
     {
         if (markerPrefab == null)
         {
-            Debug.LogError("[DetectionOverlay] markerPrefab is NULL!");
+            Debug.LogError("[DetectionOverlay] markerPrefab is NULL — assign it in the Inspector!");
             return;
         }
 
@@ -159,11 +167,15 @@ public class DetectionOverlay : MonoBehaviour
 
             float dist = (det.depth_m > 0.1f && det.depth_m < 20f) ? det.depth_m : 2.0f;
 
-            // Flat position: XZ from yaw-only direction, Y always eye + offset
             Vector3 camPos = _headsetCam.transform.position;
+
+            // ── FIX: Y is ALWAYS pinned to a fixed world-space height ────────
+            // Never use camPos.y here — that drifts as the headset moves up/down.
+            // floorY + markerHeightAboveFloor places the marker at a stable height
+            // regardless of where the user's head is vertically.
             Vector3 target = new Vector3(
                 camPos.x + dir.x * dist,
-                camPos.y + markerYOffset,   // ← Y is ALWAYS this. No drift possible.
+                floorY + markerHeightAboveFloor + markerYOffset,
                 camPos.z + dir.z * dist
             );
 
@@ -174,7 +186,7 @@ public class DetectionOverlay : MonoBehaviour
                 _markerPool[i] = go.GetComponent<ThroughWallMarker>();
                 if (_markerPool[i] == null)
                 {
-                    Debug.LogError("[DetectionOverlay] ThroughWallMarker component missing!");
+                    Debug.LogError("[DetectionOverlay] markerPrefab is missing ThroughWallMarker component!");
                     continue;
                 }
             }
@@ -182,16 +194,15 @@ public class DetectionOverlay : MonoBehaviour
             string className = det.label.Split(' ')[0];
             Debug.Log($"[DetectionOverlay] Marker {i} → {className} depth={det.depth_m:F2}m pos={target}");
             _markerPool[i].SetData(className, det.depth_m, target);
-            // Note: ThroughWallMarker.Update() handles billboarding — no LookAt needed here
         }
 
-        // Hide unused markers
+        // Hide unused pool slots
         for (int i = detections.Count; i < _markerPool.Count; i++)
             if (_markerPool.ContainsKey(i) && _markerPool[i] != null)
                 _markerPool[i].Hide();
     }
 
-    // ── Camera feed: 2D labels on video quad ───────────────
+    // ── Camera feed: 2D labels on video quad ────────────────────────────────
     void UpdateLabels(List<Detection> detections)
     {
         for (int i = 0; i < detections.Count; i++)
