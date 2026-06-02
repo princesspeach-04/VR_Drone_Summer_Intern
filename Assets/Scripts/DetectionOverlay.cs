@@ -40,53 +40,64 @@ public class DetectionOverlay : MonoBehaviour
 
     [Header("Camera FOV (degrees) — match A8 mini lens")]
     public float cameraHFov = 90f;
-    public float cameraVFov = 60f;
 
-    [Header("World Position")]
-    [Tooltip("Y height of the floor in Unity world space. Set to 0 if your floor is at origin.")]
-    public float floorY = 0f;
-    [Tooltip("How high above the floor to place markers (metres). ~1.2 = chest height.")]
-    public float markerHeightAboveFloor = 1.2f;
-    [Tooltip("Additional Y offset on top of floor + height.")]
-    public float markerYOffset = 0.2f;
+    [Tooltip("Where YOU (the headset) stand in the room, " +
+             "facing the drone's room.\n" +
+             "Set X=0 Y=0 Z=0 if you stand at the Unity origin.")]
+    public Vector3 viewerWorldPosition = Vector3.zero;
 
-    // ── internals ──────────────────────────────────────────
-    private Dictionary<int, GameObject> _pool = new Dictionary<int, GameObject>();
+    [Tooltip("The compass direction (Y rotation in degrees) " +
+             "that the drone camera faces in YOUR world.\n" +
+             "0 = Unity +Z (forward), 90 = Unity +X (right), etc.")]
+    public float droneFacingYaw = 0f;
+
+    [Tooltip("Height in metres at which markers float " +
+             "(world Y, e.g. 1.6 = eye level).")]
+    public float markerWorldY = 1.6f;
+
+    [Tooltip("Vertical gap between stacked markers " +
+             "when multiple people are detected.")]
+    public float markerStackOffset = 0.35f;
+
+    // ── internals ──────────────────────────────────────────────
+    private Dictionary<int, GameObject> _labelPool = new Dictionary<int, GameObject>();
     private Dictionary<int, ThroughWallMarker> _markerPool = new Dictionary<int, ThroughWallMarker>();
 
-    private bool _passthroughMode = true;   // default TRUE — must match ModeManager
+    private bool _passthroughMode = false;
     private bool _lastPollFailed = false;
-    private Camera _headsetCam;
+    private Camera _cam;
 
     void Start()
     {
+        _cam = Camera.main;
         _passthroughMode = true;
-        _headsetCam = Camera.main;
-        Debug.Log("[DetectionOverlay] Start — passthrough=TRUE " +
-                  $"markerPrefab={(markerPrefab == null ? "NULL" : "OK")} " +
-                  $"stream={streamWidth}x{streamHeight}");
+        Debug.Log($"[DetectionOverlay] Start — markerPrefab=" +
+                  $"{(markerPrefab == null ? "NULL" : "OK")}");
         StartCoroutine(PollLoop());
     }
 
+    // ── Called by ModeManager ──────────────────────────────────
     public void SetPassthroughMode(bool passthrough)
     {
         _passthroughMode = passthrough;
-        Debug.Log("[DetectionOverlay] SetPassthroughMode → " + (passthrough ? "PASSTHROUGH" : "CAMERA FEED"));
+        Debug.Log("[DetectionOverlay] Mode → " +
+                  (passthrough ? "PASSTHROUGH" : "CAMERA FEED"));
 
         if (_passthroughMode)
         {
-            // Entering passthrough: hide 2D labels, show 3D markers
-            foreach (var go in _pool.Values)
+            // Entering passthrough: hide 2-D labels
+            foreach (var go in _labelPool.Values)
                 if (go != null) go.SetActive(false);
         }
         else
         {
-            // Entering camera feed: hide 3D markers, show 2D labels
+            // Entering camera feed: hide ALL 3-D markers
             foreach (var m in _markerPool.Values)
                 if (m != null) m.Hide();
         }
     }
 
+    // ── Poll /detections ───────────────────────────────────────
     IEnumerator PollLoop()
     {
         string url = $"http://{jetsonHostname}:{jetsonPort}/detections";
@@ -100,10 +111,12 @@ public class DetectionOverlay : MonoBehaviour
             if (req.result == UnityWebRequest.Result.Success)
             {
                 _lastPollFailed = false;
-                var data = JsonUtility.FromJson<DetectionResponse>(req.downloadHandler.text);
+                var data = JsonUtility.FromJson<DetectionResponse>(
+                               req.downloadHandler.text);
                 if (data?.detections != null)
                 {
-                    Debug.Log($"[DetectionOverlay] Got {data.detections.Count} detections | passthrough={_passthroughMode}");
+                    Debug.Log($"[DetectionOverlay] {data.detections.Count}" +
+                              $" detections passthrough={_passthroughMode}");
                     UpdateOverlay(data.detections);
                 }
             }
@@ -121,115 +134,106 @@ public class DetectionOverlay : MonoBehaviour
 
     void UpdateOverlay(List<Detection> detections)
     {
-        // Passthrough mode → 3D world-space markers (visible through walls via OVR)
-        // Camera feed mode → 2D labels overlaid on the video quad
         if (_passthroughMode)
             UpdateMarkers(detections);
         else
             UpdateLabels(detections);
     }
 
-    // ── YAW-ONLY direction — strips camera pitch completely ──────────────────
-    // Using only yaw prevents the ray from tilting downward when the user looks
-    // slightly down, which was causing markers to drift in Z and then in Y.
-    Vector3 PixelToWorldDirection(float pixelX)
+    // ── Convert drone-camera pixel → world position ────────────
+    //
+    // The drone sees the room from a fixed position/angle.
+    // We treat the drone camera like a virtual camera:
+    //   • droneFacingYaw  = which direction it points in your world
+    //   • depth_m         = distance from drone to person
+    //   • pixel X         = left/right angle within the drone's FOV
+    //
+    // Result is a flat world-space position (Y is always markerWorldY).
+    //
+    Vector3 DetectionToWorldPosition(Detection det, int slotIndex)
     {
-        float nx = (pixelX / streamWidth) - 0.5f;                    // -0.5..+0.5
+        // Normalise pixel centre to -0.5 .. +0.5
+        float cx = (det.x1 + det.x2) * 0.5f;
+        float nx = (cx / streamWidth) - 0.5f;
+
+        // Horizontal angle offset from drone centre
         float tanH = Mathf.Tan(cameraHFov * 0.5f * Mathf.Deg2Rad);
+        float angleOffset = Mathf.Atan(nx * 2f * tanH) * Mathf.Rad2Deg;
 
-        // Only use the headset's yaw — no pitch, no roll
-        float yaw = _headsetCam.transform.eulerAngles.y;
-        Quaternion yawOnly = Quaternion.Euler(0f, yaw, 0f);
+        Debug.Log(
+            $"[WORLDMAP_TEST] " +
+            $"x1={det.x1} " +
+            $"x2={det.x2} " +
+            $"cx={cx:F0} " +
+            $"angle={angleOffset:F1} " +
+            $"depth={det.depth_m:F2}"
+        );
 
-        Vector3 flatForward = yawOnly * Vector3.forward;
-        Vector3 flatRight = yawOnly * Vector3.right;
+        // Final bearing = drone's facing yaw + left/right offset
+        float bearing = droneFacingYaw + angleOffset;
 
-        return (flatForward + flatRight * (nx * 2f * tanH)).normalized;
+        // Flat direction in world space
+        Quaternion rot = Quaternion.Euler(0f, bearing, 0f);
+        Vector3 dir = rot * Vector3.forward;
+
+        float dist = (det.depth_m > 0.1f && det.depth_m < 20f)
+                     ? det.depth_m : 2.0f;
+
+        // Stack multiple markers vertically so they don't overlap
+        float y = markerWorldY + slotIndex * markerStackOffset;
+
+        return new Vector3(
+            viewerWorldPosition.x + dir.x * dist,
+            y,
+            viewerWorldPosition.z + dir.z * dist
+        );
     }
 
-    // ── Passthrough: 3D world-space markers ─────────────────────────────────
+    // ── PASSTHROUGH: 3-D world-space markers ──────────────────
     void UpdateMarkers(List<Detection> detections)
     {
         if (markerPrefab == null)
         {
-            Debug.LogError("[DetectionOverlay] markerPrefab is NULL — assign it in the Inspector!");
+            Debug.LogError("[DetectionOverlay] markerPrefab is NULL!");
             return;
         }
 
-        if (_headsetCam == null) _headsetCam = Camera.main;
-
         for (int i = 0; i < detections.Count; i++)
         {
-            var det = detections[i];
-
-            float cx = (det.x1 + det.x2) * 0.5f;
-            Vector3 dir = PixelToWorldDirection(cx);
-
-            float dist = (det.depth_m > 0.1f && det.depth_m < 20f) ? det.depth_m : 2.0f;
-
-            Vector3 camPos = _headsetCam.transform.position;
-
-            // ── FIX: Y is ALWAYS pinned to a fixed world-space height ────────
-            // Never use camPos.y here — that drifts as the headset moves up/down.
-            // floorY + markerHeightAboveFloor places the marker at a stable height
-            // regardless of where the user's head is vertically.
-            Vector3 target = new Vector3(
-                camPos.x + dir.x * dist,
-                floorY + markerHeightAboveFloor + markerYOffset,
-                camPos.z + dir.z * dist
-            );
-
-            // Get or create marker
             if (!_markerPool.ContainsKey(i) || _markerPool[i] == null)
             {
                 var go = Instantiate(markerPrefab, transform);
                 _markerPool[i] = go.GetComponent<ThroughWallMarker>();
                 if (_markerPool[i] == null)
                 {
-                    Debug.LogError("[DetectionOverlay] markerPrefab is missing ThroughWallMarker component!");
+                    Debug.LogError("[DetectionOverlay] ThroughWallMarker missing!");
+                    Destroy(go);
                     continue;
                 }
             }
 
+            var det = detections[i];
+            Vector3 pos = DetectionToWorldPosition(det, i);
+
             string className = det.label.Split(' ')[0];
-            Debug.Log($"[DetectionOverlay] Marker {i} → {className} depth={det.depth_m:F2}m pos={target}");
-            _markerPool[i].SetData(className, det.depth_m, target);
+            Debug.Log($"[DetectionOverlay] Marker {i} {className}" +
+                      $" depth={det.depth_m:F2}m pos={pos}");
+
+            _markerPool[i].SetData(className, det.depth_m, pos);
         }
 
-        // Hide unused pool slots
+        // Hide unused slots
         for (int i = detections.Count; i < _markerPool.Count; i++)
             if (_markerPool.ContainsKey(i) && _markerPool[i] != null)
                 _markerPool[i].Hide();
     }
 
-    // ── Camera feed: 2D labels on video quad ────────────────────────────────
+    // ── CAMERA FEED: 2-D labels on video quad ─────────────────
+    // (Python already draws bounding boxes on the stream itself;
+    //  these labels just float above each box on the video quad)
     void UpdateLabels(List<Detection> detections)
     {
-        for (int i = 0; i < detections.Count; i++)
-        {
-            if (!_pool.ContainsKey(i))
-                _pool[i] = Instantiate(labelPrefab, transform);
 
-            var go = _pool[i];
-            var det = detections[i];
-            go.SetActive(true);
-
-            var tmp = go.GetComponentInChildren<TextMeshProUGUI>();
-            if (tmp != null)
-            {
-                tmp.text = det.label;
-                tmp.color = Color.white;
-            }
-
-            float u = (det.x1 + det.x2) * 0.5f / streamWidth;
-            float v = (det.y1 + det.y2) * 0.5f / streamHeight;
-
-            go.transform.position = PixelToWorld(u, v, det.y1);
-        }
-
-        for (int i = detections.Count; i < _pool.Count; i++)
-            if (_pool.ContainsKey(i))
-                _pool[i].SetActive(false);
     }
 
     Vector3 PixelToWorld(float u, float v, int pixelY)
@@ -237,7 +241,8 @@ public class DetectionOverlay : MonoBehaviour
         if (videoScreen == null) return Vector3.zero;
         var b = videoScreen.bounds;
         float x = Mathf.Lerp(b.min.x, b.max.x, u);
-        float y = Mathf.Lerp(b.max.y, b.min.y, (float)pixelY / streamHeight)
+        float y = Mathf.Lerp(b.max.y, b.min.y,
+                      (float)pixelY / streamHeight)
                   + b.size.y * 0.03f;
         float z = b.min.z - 0.01f;
         return new Vector3(x, y, z);
@@ -245,7 +250,7 @@ public class DetectionOverlay : MonoBehaviour
 
     void HideAll()
     {
-        foreach (var go in _pool.Values)
+        foreach (var go in _labelPool.Values)
             if (go != null) go.SetActive(false);
         foreach (var m in _markerPool.Values)
             if (m != null) m.Hide();
@@ -253,7 +258,15 @@ public class DetectionOverlay : MonoBehaviour
 
     void OnDrawGizmos()
     {
+        // Viewer origin
         Gizmos.color = Color.cyan;
-        Gizmos.DrawWireSphere(transform.position, 0.1f);
+        Gizmos.DrawWireSphere(viewerWorldPosition, 0.15f);
+
+        // Drone facing direction arrow
+        Gizmos.color = Color.yellow;
+        Quaternion rot = Quaternion.Euler(0f, droneFacingYaw, 0f);
+        Vector3 fwd = rot * Vector3.forward;
+        Gizmos.DrawLine(viewerWorldPosition,
+                        viewerWorldPosition + fwd * 1.5f);
     }
 }
