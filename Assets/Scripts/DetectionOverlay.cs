@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
-using TMPro;
 
 [System.Serializable]
 public class Detection
@@ -10,7 +9,6 @@ public class Detection
     public string label;
     public int x1, y1, x2, y2;
     public float depth_m;
-    public float world_x, world_y, world_z;
     public bool tracking;
 }
 
@@ -31,77 +29,111 @@ public class DetectionOverlay : MonoBehaviour
     public int streamWidth = 640;
     public int streamHeight = 360;
 
-    [Header("Scene refs")]
-    public Renderer videoScreen;
-    public GameObject labelPrefab;
+    [Header("Fixed Camera — World Geometry")]
+    [Tooltip("Camera position in metres relative to Quest world origin.")]
+    public Vector3 cameraWorldPosition = Vector3.zero;
 
-    [Header("Through-Wall Marker")]
-    public GameObject markerPrefab;
+    [Tooltip("Camera orientation as Euler angles (degrees). " +
+             "Yaw: compass heading (0=+Z, 90=+X). " +
+             "Pitch: tilt down is positive. Roll: rarely needed.")]
+    public Vector3 cameraWorldEuler = Vector3.zero;
 
-    [Header("Camera FOV (degrees) — match A8 mini lens")]
+    [Tooltip("Horizontal FOV of the camera in degrees (e.g. 90 for A8 mini).")]
     public float cameraHFov = 90f;
 
-    [Tooltip("Where YOU (the headset) stand in the room, " +
-             "facing the drone's room.\n" +
-             "Set X=0 Y=0 Z=0 if you stand at the Unity origin.")]
-    public Vector3 viewerWorldPosition = Vector3.zero;
+    [Tooltip("Depth clamp range (metres). " +
+             "MiDaS values outside this are replaced with fallbackDepth.")]
+    public float minDepth = 0.3f;
+    public float maxDepth = 15f;
+    public float fallbackDepth = 3f;
 
-    [Tooltip("The compass direction (Y rotation in degrees) " +
-             "that the drone camera faces in YOUR world.\n" +
-             "0 = Unity +Z (forward), 90 = Unity +X (right), etc.")]
-    public float droneFacingYaw = 0f;
+    [Header("Calibration Trim")]
+    [Tooltip("Fine-tune left/right alignment. Negative = shift marker left, Positive = right.")]
+    public float yawTrimDegrees = 0f;
 
-    [Tooltip("Height in metres at which markers float " +
-             "(world Y, e.g. 1.6 = eye level).")]
-    public float markerWorldY = 1.6f;
+    [Tooltip("Fine-tune up/down alignment. Negative = shift marker down, Positive = up.")]
+    public float pitchTrimDegrees = 0f;
 
-    [Tooltip("Vertical gap between stacked markers " +
-             "when multiple people are detected.")]
-    public float markerStackOffset = 0.35f;
+    [Header("Scene refs")]
+    public Renderer videoScreen;
+    public GameObject markerPrefab;
 
-    // ── internals ──────────────────────────────────────────────
-    private Dictionary<int, GameObject> _labelPool = new Dictionary<int, GameObject>();
-    private Dictionary<int, ThroughWallMarker> _markerPool = new Dictionary<int, ThroughWallMarker>();
+    private Quaternion _cameraWorldRotation;
+    private Quaternion _baseRotation;
+
+    private Dictionary<int, ThroughWallMarker> _markerPool
+        = new Dictionary<int, ThroughWallMarker>();
 
     private bool _passthroughMode = false;
     private bool _lastPollFailed = false;
-    private Camera _cam;
 
     void Start()
     {
-        _cam = Camera.main;
+        // Base rotation from headset at launch
+        _baseRotation = Camera.main.transform.rotation;
+
+        // Apply trim on top
+        _cameraWorldRotation = _baseRotation
+                             * Quaternion.Euler(-pitchTrimDegrees, yawTrimDegrees, 0f);
+
+        Debug.Log($"[Calib] Camera world rotation set to headset rotation at start");
+        Debug.Log($"[Calib] Camera forward in world: {_cameraWorldRotation * Vector3.forward}");
+
         _passthroughMode = true;
-        Debug.Log($"[DetectionOverlay] Start — markerPrefab=" +
-                  $"{(markerPrefab == null ? "NULL" : "OK")}");
         StartCoroutine(PollLoop());
     }
 
-    // ── Called by ModeManager ──────────────────────────────────
+    void OnValidate()
+    {
+        _cameraWorldRotation = Quaternion.Euler(cameraWorldEuler);
+    }
+
+    void Update()
+    {
+        // Right thumbstick X to trim yaw in real time
+        float stickX = OVRInput.Get(OVRInput.Axis2D.SecondaryThumbstick).x;
+        if (Mathf.Abs(stickX) > 0.1f)
+        {
+            yawTrimDegrees += stickX * Time.deltaTime * 20f;
+
+            _cameraWorldRotation = _baseRotation
+                                 * Quaternion.Euler(-pitchTrimDegrees, yawTrimDegrees, 0f);
+
+            Debug.Log($"[Calib] Yaw trim: {yawTrimDegrees:F1}°  " +
+                      $"Camera forward: {_cameraWorldRotation * Vector3.forward}");
+        }
+
+        // Right thumbstick Y to trim pitch in real time
+        float stickY = OVRInput.Get(OVRInput.Axis2D.SecondaryThumbstick).y;
+        if (Mathf.Abs(stickY) > 0.1f)
+        {
+            pitchTrimDegrees += stickY * Time.deltaTime * 20f;
+
+            _cameraWorldRotation = _baseRotation
+                                 * Quaternion.Euler(-pitchTrimDegrees, yawTrimDegrees, 0f);
+
+            Debug.Log($"[Calib] Pitch trim: {pitchTrimDegrees:F1}°  " +
+                      $"Camera forward: {_cameraWorldRotation * Vector3.forward}");
+        }
+    }
+
     public void SetPassthroughMode(bool passthrough)
     {
         _passthroughMode = passthrough;
-        Debug.Log("[DetectionOverlay] Mode → " +
-                  (passthrough ? "PASSTHROUGH" : "CAMERA FEED"));
-
         if (_passthroughMode)
         {
-            // Entering passthrough: hide 2-D labels
-            foreach (var go in _labelPool.Values)
-                if (go != null) go.SetActive(false);
+            // 2-D label pool would be hidden here
         }
         else
         {
-            // Entering camera feed: hide ALL 3-D markers
             foreach (var m in _markerPool.Values)
                 if (m != null) m.Hide();
         }
     }
 
-    // ── Poll /detections ───────────────────────────────────────
     IEnumerator PollLoop()
     {
         string url = $"http://{jetsonHostname}:{jetsonPort}/detections";
-
         while (true)
         {
             using var req = UnityWebRequest.Get(url);
@@ -111,14 +143,9 @@ public class DetectionOverlay : MonoBehaviour
             if (req.result == UnityWebRequest.Result.Success)
             {
                 _lastPollFailed = false;
-                var data = JsonUtility.FromJson<DetectionResponse>(
-                               req.downloadHandler.text);
+                var data = JsonUtility.FromJson<DetectionResponse>(req.downloadHandler.text);
                 if (data?.detections != null)
-                {
-                    Debug.Log($"[DetectionOverlay] {data.detections.Count}" +
-                              $" detections passthrough={_passthroughMode}");
                     UpdateOverlay(data.detections);
-                }
             }
             else
             {
@@ -136,67 +163,44 @@ public class DetectionOverlay : MonoBehaviour
     {
         if (_passthroughMode)
             UpdateMarkers(detections);
-        else
-            UpdateLabels(detections);
+        // camera-feed mode: Python already drew boxes on the MJPEG stream
     }
 
-    // ── Convert drone-camera pixel → world position ────────────
-    //
-    // The drone sees the room from a fixed position/angle.
-    // We treat the drone camera like a virtual camera:
-    //   • droneFacingYaw  = which direction it points in your world
-    //   • depth_m         = distance from drone to person
-    //   • pixel X         = left/right angle within the drone's FOV
-    //
-    // Result is a flat world-space position (Y is always markerWorldY).
-    //
-    Vector3 DetectionToWorldPosition(Detection det, int slotIndex)
+    Vector3 DetectionToWorldPosition(Detection det)
     {
-        // Normalise pixel centre to -0.5 .. +0.5
+        // ① Detection centre
         float cx = (det.x1 + det.x2) * 0.5f;
-        float nx = (cx / streamWidth) - 0.5f;
+        float cy = (det.y1 + det.y2) * 0.5f;
 
-        // Horizontal angle offset from drone centre
+        // ② NDC — Y is flipped: pixel (0,0) is top-left, Unity Y is up
+        float ndcX = (cx / streamWidth) - 0.5f;
+        float ndcY = -(cy / streamHeight) + 0.5f;
+
+        // ③ Half-tangents
         float tanH = Mathf.Tan(cameraHFov * 0.5f * Mathf.Deg2Rad);
-        float angleOffset = Mathf.Atan(nx * 2f * tanH) * Mathf.Rad2Deg;
+        float tanV = tanH * ((float)streamHeight / streamWidth);
 
-        Debug.Log(
-            $"[WORLDMAP_TEST] " +
-            $"x1={det.x1} " +
-            $"x2={det.x2} " +
-            $"cx={cx:F0} " +
-            $"angle={angleOffset:F1} " +
-            $"depth={det.depth_m:F2}"
-        );
+        // Local-space ray in camera frame (Z forward, X right, Y up)
+        Vector3 localRay = new Vector3(
+            ndcX * 2f * tanH,
+            ndcY * 2f * tanV,
+            1f
+        ).normalized;
 
-        // Final bearing = drone's facing yaw + left/right offset
-        float bearing = droneFacingYaw + angleOffset;
+        // ④ Rotate into world space
+        Vector3 worldRay = _cameraWorldRotation * localRay;
 
-        // Flat direction in world space
-        Quaternion rot = Quaternion.Euler(0f, bearing, 0f);
-        Vector3 dir = rot * Vector3.forward;
+        // ⑤⑥ Apply depth from camera world position
+        float depth = (det.depth_m > minDepth && det.depth_m < maxDepth)
+                      ? det.depth_m
+                      : fallbackDepth;
 
-        float dist = (det.depth_m > 0.1f && det.depth_m < 20f)
-                     ? det.depth_m : 2.0f;
-
-        // Stack multiple markers vertically so they don't overlap
-        float y = markerWorldY + slotIndex * markerStackOffset;
-
-        return new Vector3(
-            viewerWorldPosition.x + dir.x * dist,
-            y,
-            viewerWorldPosition.z + dir.z * dist
-        );
+        return cameraWorldPosition + worldRay * depth;
     }
 
-    // ── PASSTHROUGH: 3-D world-space markers ──────────────────
     void UpdateMarkers(List<Detection> detections)
     {
-        if (markerPrefab == null)
-        {
-            Debug.LogError("[DetectionOverlay] markerPrefab is NULL!");
-            return;
-        }
+        if (markerPrefab == null) { Debug.LogError("markerPrefab is NULL"); return; }
 
         for (int i = 0; i < detections.Count; i++)
         {
@@ -206,67 +210,42 @@ public class DetectionOverlay : MonoBehaviour
                 _markerPool[i] = go.GetComponent<ThroughWallMarker>();
                 if (_markerPool[i] == null)
                 {
-                    Debug.LogError("[DetectionOverlay] ThroughWallMarker missing!");
+                    Debug.LogError("ThroughWallMarker component missing on prefab");
                     Destroy(go);
                     continue;
                 }
             }
 
-            var det = detections[i];
-            Vector3 pos = DetectionToWorldPosition(det, i);
-
+            Detection det = detections[i];
+            Vector3 worldPos = DetectionToWorldPosition(det);
             string className = det.label.Split(' ')[0];
-            Debug.Log($"[DetectionOverlay] Marker {i} {className}" +
-                      $" depth={det.depth_m:F2}m pos={pos}");
 
-            _markerPool[i].SetData(className, det.depth_m, pos);
+            _markerPool[i].SetData(className, det.depth_m, worldPos);
         }
 
-        // Hide unused slots
         for (int i = detections.Count; i < _markerPool.Count; i++)
             if (_markerPool.ContainsKey(i) && _markerPool[i] != null)
                 _markerPool[i].Hide();
     }
 
-    // ── CAMERA FEED: 2-D labels on video quad ─────────────────
-    // (Python already draws bounding boxes on the stream itself;
-    //  these labels just float above each box on the video quad)
-    void UpdateLabels(List<Detection> detections)
-    {
-
-    }
-
-    Vector3 PixelToWorld(float u, float v, int pixelY)
-    {
-        if (videoScreen == null) return Vector3.zero;
-        var b = videoScreen.bounds;
-        float x = Mathf.Lerp(b.min.x, b.max.x, u);
-        float y = Mathf.Lerp(b.max.y, b.min.y,
-                      (float)pixelY / streamHeight)
-                  + b.size.y * 0.03f;
-        float z = b.min.z - 0.01f;
-        return new Vector3(x, y, z);
-    }
-
     void HideAll()
     {
-        foreach (var go in _labelPool.Values)
-            if (go != null) go.SetActive(false);
         foreach (var m in _markerPool.Values)
             if (m != null) m.Hide();
     }
 
     void OnDrawGizmos()
     {
-        // Viewer origin
-        Gizmos.color = Color.cyan;
-        Gizmos.DrawWireSphere(viewerWorldPosition, 0.15f);
-
-        // Drone facing direction arrow
         Gizmos.color = Color.yellow;
-        Quaternion rot = Quaternion.Euler(0f, droneFacingYaw, 0f);
-        Vector3 fwd = rot * Vector3.forward;
-        Gizmos.DrawLine(viewerWorldPosition,
-                        viewerWorldPosition + fwd * 1.5f);
+        Gizmos.DrawWireCube(cameraWorldPosition, Vector3.one * 0.1f);
+
+        Quaternion rot = Quaternion.Euler(cameraWorldEuler);
+        Gizmos.color = Color.cyan;
+        Gizmos.DrawLine(cameraWorldPosition,
+                        cameraWorldPosition + rot * Vector3.forward * 2f);
+
+        Gizmos.color = Color.green;
+        Gizmos.DrawLine(cameraWorldPosition,
+                        cameraWorldPosition + rot * Vector3.up * 0.5f);
     }
 }
