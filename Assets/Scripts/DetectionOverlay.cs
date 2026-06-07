@@ -30,105 +30,121 @@ public class DetectionOverlay : MonoBehaviour
     public int streamHeight = 360;
 
     [Header("Fixed Camera — World Geometry")]
-    [Tooltip("Camera position in metres relative to Quest world origin.")]
     public Vector3 cameraWorldPosition = Vector3.zero;
-
-    [Tooltip("Camera orientation as Euler angles (degrees). " +
-             "Yaw: compass heading (0=+Z, 90=+X). " +
-             "Pitch: tilt down is positive. Roll: rarely needed.")]
     public Vector3 cameraWorldEuler = Vector3.zero;
-
-    [Tooltip("Horizontal FOV of the camera in degrees (e.g. 90 for A8 mini).")]
     public float cameraHFov = 90f;
-
-    [Tooltip("Depth clamp range (metres). " +
-             "MiDaS values outside this are replaced with fallbackDepth.")]
     public float minDepth = 0.3f;
     public float maxDepth = 15f;
     public float fallbackDepth = 3f;
 
     [Header("Calibration Trim")]
-    [Tooltip("Fine-tune left/right alignment. Negative = shift marker left, Positive = right.")]
-    public float yawTrimDegrees = 0f;
+    [Tooltip("Each thumbstick step changes trim by this many degrees.")]
+    public float trimStepDegrees = 1f;
 
-    [Tooltip("Fine-tune up/down alignment. Negative = shift marker down, Positive = up.")]
+    [Tooltip("How long (seconds) before the next step triggers while holding the stick.")]
+    public float trimRepeatDelay = 0.2f;
+
+    public float yawTrimDegrees = 0f;
     public float pitchTrimDegrees = 0f;
 
     [Header("Scene refs")]
     public Renderer videoScreen;
     public GameObject markerPrefab;
 
-    private Quaternion _cameraWorldRotation;
+    // ── internals ──────────────────────────────────────────────
     private Quaternion _baseRotation;
+    private Quaternion _cameraWorldRotation;
 
-    private Dictionary<int, ThroughWallMarker> _markerPool
-        = new Dictionary<int, ThroughWallMarker>();
+    private float _yawRepeatTimer = 0f;
+    private float _pitchRepeatTimer = 0f;
+    private bool _yawWasNeutral = true;
+    private bool _pitchWasNeutral = true;
 
+    private Dictionary<int, ThroughWallMarker> _markerPool = new();
     private bool _passthroughMode = false;
     private bool _lastPollFailed = false;
 
     void Start()
     {
-        // Base rotation from headset at launch
         _baseRotation = Camera.main.transform.rotation;
-
-        // Apply trim on top
-        _cameraWorldRotation = _baseRotation
-                             * Quaternion.Euler(-pitchTrimDegrees, yawTrimDegrees, 0f);
-
-        Debug.Log($"[Calib] Camera world rotation set to headset rotation at start");
-        Debug.Log($"[Calib] Camera forward in world: {_cameraWorldRotation * Vector3.forward}");
+        RebuildRotation();
 
         _passthroughMode = true;
         StartCoroutine(PollLoop());
     }
 
-    void OnValidate()
-    {
-        _cameraWorldRotation = Quaternion.Euler(cameraWorldEuler);
-    }
-
     void Update()
     {
-        // Right thumbstick X to trim yaw in real time
-        float stickX = OVRInput.Get(OVRInput.Axis2D.SecondaryThumbstick).x;
-        if (Mathf.Abs(stickX) > 0.1f)
+        Vector2 stick = OVRInput.Get(OVRInput.Axis2D.SecondaryThumbstick);
+
+        bool yawChanged = HandleAxis(stick.x, ref yawTrimDegrees,
+                                       ref _yawWasNeutral, ref _yawRepeatTimer);
+        bool pitchChanged = HandleAxis(stick.y, ref pitchTrimDegrees,
+                                       ref _pitchWasNeutral, ref _pitchRepeatTimer);
+
+        if (yawChanged || pitchChanged)
         {
-            yawTrimDegrees += stickX * Time.deltaTime * 20f;
-
-            _cameraWorldRotation = _baseRotation
-                                 * Quaternion.Euler(-pitchTrimDegrees, yawTrimDegrees, 0f);
-
-            Debug.Log($"[Calib] Yaw trim: {yawTrimDegrees:F1}°  " +
-                      $"Camera forward: {_cameraWorldRotation * Vector3.forward}");
+            RebuildRotation();
+            Debug.Log($"[Calib] Yaw={yawTrimDegrees:F1}°  Pitch={pitchTrimDegrees:F1}°" +
+                      $"  Forward={_cameraWorldRotation * Vector3.forward}");
         }
 
-        // Right thumbstick Y to trim pitch in real time
-        float stickY = OVRInput.Get(OVRInput.Axis2D.SecondaryThumbstick).y;
-        if (Mathf.Abs(stickY) > 0.1f)
+        // B button = reset trim to zero
+        if (OVRInput.GetDown(OVRInput.Button.Two))
         {
-            pitchTrimDegrees += stickY * Time.deltaTime * 20f;
-
-            _cameraWorldRotation = _baseRotation
-                                 * Quaternion.Euler(-pitchTrimDegrees, yawTrimDegrees, 0f);
-
-            Debug.Log($"[Calib] Pitch trim: {pitchTrimDegrees:F1}°  " +
-                      $"Camera forward: {_cameraWorldRotation * Vector3.forward}");
+            yawTrimDegrees = 0f;
+            pitchTrimDegrees = 0f;
+            RebuildRotation();
+            Debug.Log("[Calib] Trim reset to 0");
         }
+    }
+
+    bool HandleAxis(float axis, ref float trim,
+                    ref bool wasNeutral, ref float repeatTimer)
+    {
+        const float deadzone = 0.5f;
+        bool active = Mathf.Abs(axis) > deadzone;
+
+        if (!active)
+        {
+            wasNeutral = true;
+            repeatTimer = 0f;
+            return false;
+        }
+
+        float sign = Mathf.Sign(axis);
+
+        if (wasNeutral)
+        {
+            trim += sign * trimStepDegrees;
+            wasNeutral = false;
+            repeatTimer = 0f;
+            return true;
+        }
+
+        repeatTimer += Time.deltaTime;
+        if (repeatTimer >= trimRepeatDelay)
+        {
+            trim += sign * trimStepDegrees;
+            repeatTimer = 0f;
+            return true;
+        }
+
+        return false;
+    }
+
+    void RebuildRotation()
+    {
+        _cameraWorldRotation = _baseRotation
+            * Quaternion.Euler(-pitchTrimDegrees, yawTrimDegrees, 0f);
     }
 
     public void SetPassthroughMode(bool passthrough)
     {
         _passthroughMode = passthrough;
-        if (_passthroughMode)
-        {
-            // 2-D label pool would be hidden here
-        }
-        else
-        {
+        if (!_passthroughMode)
             foreach (var m in _markerPool.Values)
                 if (m != null) m.Hide();
-        }
     }
 
     IEnumerator PollLoop()
@@ -161,39 +177,30 @@ public class DetectionOverlay : MonoBehaviour
 
     void UpdateOverlay(List<Detection> detections)
     {
-        if (_passthroughMode)
-            UpdateMarkers(detections);
-        // camera-feed mode: Python already drew boxes on the MJPEG stream
+        if (_passthroughMode) UpdateMarkers(detections);
     }
 
     Vector3 DetectionToWorldPosition(Detection det)
     {
-        // ① Detection centre
         float cx = (det.x1 + det.x2) * 0.5f;
         float cy = (det.y1 + det.y2) * 0.5f;
 
-        // ② NDC — Y is flipped: pixel (0,0) is top-left, Unity Y is up
-        float ndcX = (cx / streamWidth) - 0.5f;
-        float ndcY = -(cy / streamHeight) + 0.5f;
+        float ndcX = -(cx / streamWidth) - 0.5f;
+        float ndcY = (cy / streamHeight) + 0.5f;
 
-        // ③ Half-tangents
         float tanH = Mathf.Tan(cameraHFov * 0.5f * Mathf.Deg2Rad);
         float tanV = tanH * ((float)streamHeight / streamWidth);
 
-        // Local-space ray in camera frame (Z forward, X right, Y up)
         Vector3 localRay = new Vector3(
             ndcX * 2f * tanH,
             ndcY * 2f * tanV,
             1f
         ).normalized;
 
-        // ④ Rotate into world space
         Vector3 worldRay = _cameraWorldRotation * localRay;
 
-        // ⑤⑥ Apply depth from camera world position
         float depth = (det.depth_m > minDepth && det.depth_m < maxDepth)
-                      ? det.depth_m
-                      : fallbackDepth;
+                      ? det.depth_m : fallbackDepth;
 
         return cameraWorldPosition + worldRay * depth;
     }
@@ -210,7 +217,6 @@ public class DetectionOverlay : MonoBehaviour
                 _markerPool[i] = go.GetComponent<ThroughWallMarker>();
                 if (_markerPool[i] == null)
                 {
-                    Debug.LogError("ThroughWallMarker component missing on prefab");
                     Destroy(go);
                     continue;
                 }
@@ -218,9 +224,7 @@ public class DetectionOverlay : MonoBehaviour
 
             Detection det = detections[i];
             Vector3 worldPos = DetectionToWorldPosition(det);
-            string className = det.label.Split(' ')[0];
-
-            _markerPool[i].SetData(className, det.depth_m, worldPos);
+            _markerPool[i].SetData(det.label.Split(' ')[0], det.depth_m, worldPos);
         }
 
         for (int i = detections.Count; i < _markerPool.Count; i++)
@@ -238,14 +242,9 @@ public class DetectionOverlay : MonoBehaviour
     {
         Gizmos.color = Color.yellow;
         Gizmos.DrawWireCube(cameraWorldPosition, Vector3.one * 0.1f);
-
         Quaternion rot = Quaternion.Euler(cameraWorldEuler);
         Gizmos.color = Color.cyan;
         Gizmos.DrawLine(cameraWorldPosition,
                         cameraWorldPosition + rot * Vector3.forward * 2f);
-
-        Gizmos.color = Color.green;
-        Gizmos.DrawLine(cameraWorldPosition,
-                        cameraWorldPosition + rot * Vector3.up * 0.5f);
     }
 }

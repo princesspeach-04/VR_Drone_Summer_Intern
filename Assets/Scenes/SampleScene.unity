@@ -901,10 +901,14 @@ MonoBehaviour:
   streamHeight: 360
   cameraWorldPosition: {x: 0, y: 0, z: 1}
   cameraWorldEuler: {x: 0, y: 0, z: 0}
-  cameraHFov: 90
+  cameraHFov: 81
   minDepth: 0.3
   maxDepth: 15
   fallbackDepth: 3
+  trimStepDegrees: 1
+  trimRepeatDelay: 0.2
+  yawTrimDegrees: 0
+  pitchTrimDegrees: 0
   videoScreen: {fileID: 1429373123}
   markerPrefab: {fileID: 397456049194832746, guid: 621e2b31e5213484cb5a5cdabb2b8857, type: 3}
 --- !u!4 &1742675980
