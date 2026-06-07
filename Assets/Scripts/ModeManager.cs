@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
-using TMPro;
 
 public class ModeManager : MonoBehaviour
 {
@@ -13,20 +12,18 @@ public class ModeManager : MonoBehaviour
     public DetectionOverlay detectionOverlay;
 
     [Header("Controller Button")]
-    public OVRInput.Button toggleButton = OVRInput.Button.One;
-
-    [Header("UI")]
-    public TextMeshProUGUI uiButtonLabel;
+    [Tooltip("Press this button to toggle between Passthrough and Camera Feed.")]
+    public OVRInput.Button toggleButton = OVRInput.Button.One;   // A button
 
     // Prevent rapid toggling
     private const float TOGGLE_COOLDOWN = 1.0f;
     private float _lastToggleTime = -99f;
 
-    public bool IsPassthrough { get; private set; } = true;  // start in passthrough
+    public bool IsPassthrough { get; private set; } = true;
 
     private Renderer _quadRenderer;
     private Material _visibleMat;
-    private Material _hiddenMat;   // fully transparent — keeps stream alive
+    private Material _hiddenMat;
     private MJPEGStream _mjpeg;
 
     void Start()
@@ -42,27 +39,22 @@ public class ModeManager : MonoBehaviour
             {
                 _visibleMat = _quadRenderer.material;
 
-                // Transparent clone — hides quad WITHOUT disabling it so
-                // the MJPEG stream keeps decoding in the background.
+                // Fully transparent clone — hides the quad without stopping the stream
                 _hiddenMat = new Material(_visibleMat);
                 _hiddenMat.color = new Color(0, 0, 0, 0);
                 _hiddenMat.SetFloat("_Surface", 1);
                 _hiddenMat.SetFloat("_Blend", 0);
-                _hiddenMat.renderQueue = 3000;
+                _hiddenMat.SetInt("_ZWrite", 0);
+                _hiddenMat.renderQueue = 1;  // render first, before everything, writes nothing
             }
-
-            ALog("ModeManager", $"MJPEG found: {(_mjpeg != null ? "YES" : "NO")}");
         }
 
         if (passthroughLayer != null)
             passthroughLayer.enabled = false;
 
-        // ── Start in PASSTHROUGH mode ──────────────────────────────────────
-        // DetectionOverlay.Start() also defaults to passthrough=true,
-        // so both scripts agree from the very first frame.
+        // Start in passthrough mode
         IsPassthrough = true;
         ApplyMode();
-        UpdateUILabel();
     }
 
     void Update()
@@ -94,19 +86,14 @@ public class ModeManager : MonoBehaviour
         else
             EnterCameraFeed();
 
-        // Keep DetectionOverlay in sync so it routes to
-        // UpdateMarkers (passthrough) or UpdateLabels (camera feed)
         if (detectionOverlay != null)
             detectionOverlay.SetPassthroughMode(IsPassthrough);
-
-        UpdateUILabel();
     }
 
     void EnterPassthrough()
     {
         ALog("ModeManager", "EnterPassthrough");
 
-        // Hide quad visually but keep it alive for the stream
         if (_quadRenderer != null && _hiddenMat != null)
             _quadRenderer.material = _hiddenMat;
 
@@ -124,7 +111,6 @@ public class ModeManager : MonoBehaviour
     {
         ALog("ModeManager", "EnterCameraFeed");
 
-        // Restore visible material
         if (_quadRenderer != null && _visibleMat != null)
             _quadRenderer.material = _visibleMat;
 
@@ -137,21 +123,11 @@ public class ModeManager : MonoBehaviour
             mainCamera.backgroundColor = Color.black;
         }
 
-        // Stream was never paused, but reassign texture in case the
-        // material swap lost the reference.
         if (_mjpeg != null)
         {
             ALog("ModeManager", "Reassigning stream texture");
             _mjpeg.ReassignTexture();
         }
-    }
-
-    void UpdateUILabel()
-    {
-        if (uiButtonLabel == null) return;
-        uiButtonLabel.text = IsPassthrough
-            ? "Switch to Camera Feed"
-            : "Switch to Passthrough";
     }
 
     static void ALog(string tag, string msg)

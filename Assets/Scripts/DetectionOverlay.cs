@@ -37,6 +37,8 @@ public class DetectionOverlay : MonoBehaviour
     public float minDepth = 0.3f;
     public float maxDepth = 15f;
     public float fallbackDepth = 3f;
+    [Tooltip("Tick if the outline appears horizontally mirrored vs the real scene.")]
+    public bool mirrorX = false;
 
     [Header("Calibration Trim")]
     [Tooltip("Each thumbstick step changes trim by this many degrees.")]
@@ -53,10 +55,25 @@ public class DetectionOverlay : MonoBehaviour
     public float outlineWidth = 0.03f;
     public Color outlineColor = new Color(0f, 1f, 0.4f, 1f);  // green
 
+    [Header("Depth Label (shown above outline, no prefab needed)")]
+    [Tooltip("World-space height of the text in metres.")]
+    public float labelSize = 0.12f;
+    public Color labelColor = new Color(0f, 1f, 0.4f, 1f);
+
     [Header("Depth Smoothing (Unity-side EMA)")]
     [Tooltip("0 = frozen, 1 = no smoothing. 0.15 recommended for MiDaS.")]
     [Range(0.05f, 1.0f)]
     public float depthAlpha = 0.15f;
+
+    [Header("Depth Scale")]
+    [Tooltip("MiDaS depth is not metric. Scale it until the outline sits at the " +
+             "right distance. Start at 1.0. Typical range 0.3 – 2.0.")]
+    public float depthScale = 1.0f;
+
+    [Header("Contour Smoothing")]
+    [Tooltip("Catmull-Rom subdivisions per segment. 3 = smooth, 1 = raw points.")]
+    [Range(1, 6)]
+    public int splineSubdivisions = 3;
 
     [Header("Scene refs")]
     public Renderer videoScreen;
@@ -72,31 +89,20 @@ public class DetectionOverlay : MonoBehaviour
     private bool _pitchWasNeutral = true;
 
     private Dictionary<int, ThroughWallMarker> _markerPool = new();
-
-    // One LineRenderer per detection index for the person outline
     private Dictionary<int, LineRenderer> _outlinePool = new();
-
-    // Unity-side depth EMA per detection key (index-based)
+    private Dictionary<int, TextMesh> _labelPool = new();
     private Dictionary<int, float> _depthEma = new();
 
     private bool _passthroughMode = false;
     private bool _lastPollFailed = false;
 
-    // Shared material for all outlines — created once
     private Material _outlineMaterial;
 
     void Start()
     {
-        // Capture the HMD's current orientation as the base (forward = world forward).
-        // If you want world-fixed outlines regardless of HMD yaw, set this to
-        // Quaternion.identity and dial in yawTrimDegrees manually.
         _baseRotation = Quaternion.identity;
         RebuildRotation();
 
-        // ── Outline material ───────────────────────────────────────────────
-        // "UI/Default" is unlit, alpha-blended, and crucially sets ZTest Always
-        // so lines render on top of the passthrough layer even when occluded.
-        // We bump renderQueue above 4000 (OVR passthrough sits at ~3000-3500).
         _outlineMaterial = new Material(Shader.Find("UI/Default"));
         _outlineMaterial.SetInt("_ZWrite", 0);
         _outlineMaterial.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
@@ -122,7 +128,6 @@ public class DetectionOverlay : MonoBehaviour
                       $"  Forward={_cameraWorldRotation * Vector3.forward}");
         }
 
-        // B button = reset trim to zero
         if (OVRInput.GetDown(OVRInput.Button.Two))
         {
             yawTrimDegrees = 0f;
@@ -168,9 +173,8 @@ public class DetectionOverlay : MonoBehaviour
 
     void RebuildRotation()
     {
-        // Euler order: yaw (Y-axis) then pitch (X-axis), applied to base orientation.
-        // Negating pitch so "stick up = outline moves up" feels natural.
-        _cameraWorldRotation = _baseRotation
+        _cameraWorldRotation =
+            Quaternion.Euler(cameraWorldEuler)
             * Quaternion.Euler(-pitchTrimDegrees, yawTrimDegrees, 0f);
     }
 
@@ -218,61 +222,22 @@ public class DetectionOverlay : MonoBehaviour
         if (_passthroughMode) UpdateMarkers(detections);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Core projection: image-space pixel → world-space position.
-    //
-    // Coordinate conventions:
-    //   • Image X:  0 = left edge,  streamWidth  = right edge
-    //   • Image Y:  0 = top edge,   streamHeight = bottom edge
-    //   • NDC X:   -1 = left,  +1 = right  (standard)
-    //   • NDC Y:   -1 = bottom,+1 = top    (flipped vs image Y)
-    //   • Camera local: +X right, +Y up, +Z forward (Unity convention)
-    //
-    // We negate ndcX when building localRay because Unity's camera looks down
-    // +Z and image pixel X increases left→right, same as world X — so no flip
-    // is needed there. BUT the fixed external camera may be mounted so its
-    // image-left corresponds to world-right (depends on physical orientation).
-    // If your outlines appear mirrored horizontally, negate ndcX below.
-    // ─────────────────────────────────────────────────────────────────────────
-    Vector3 PixelToWorldPosition(int px, int py, float depth_m)
+    Vector3 PixelToWorldPosition(int px, int py, float rawDepth)
     {
-        // Map pixel → NDC in [-1, +1]
-        // px=0 → ndcX=-1 (left), px=W → ndcX=+1 (right)
-        // py=0 → ndcY=+1 (top),  py=H → ndcY=-1 (bottom)
+        float depth = rawDepth * depthScale;
+        if (depth < minDepth || depth > maxDepth) depth = fallbackDepth;
+
         float ndcX = (px / (float)streamWidth) * 2f - 1f;
         float ndcY = -(py / (float)streamHeight) * 2f + 1f;
 
-        // Half-extents of the view frustum at unit depth
+        if (mirrorX) ndcX = -ndcX;
+
         float tanH = Mathf.Tan(cameraHFov * 0.5f * Mathf.Deg2Rad);
         float tanV = tanH * ((float)streamHeight / streamWidth);
 
-        // Local-space ray in camera coords (not yet normalised — depth applies along Z)
-        Vector3 localRay = new Vector3(
-            ndcX * tanH,
-            ndcY * tanV,
-            1f              // camera looks down +Z in local space
-        );
+        Vector3 localRay = new Vector3(ndcX * tanH, ndcY * tanV, 1f);
 
-        // Rotate into world space using the calibrated camera orientation
-        Vector3 worldRay = _cameraWorldRotation * localRay;
-
-        // Clamp depth to sane range; use fallback if MiDaS returned garbage
-        float depth = (depth_m > minDepth && depth_m < maxDepth)
-                      ? depth_m : fallbackDepth;
-
-        // Scale ray so that its Z-component equals `depth` (i.e., depth along
-        // the optical axis, not along the ray). This avoids fisheye distortion
-        // at wide FOVs where ray length ≠ optical-axis depth.
-        // world_point = cam_pos + worldRay * (depth / localRay.magnitude)
-        // Since localRay.z == 1, localRay.magnitude == sqrt(ndcX²tanH² + ndcY²tanV² + 1)
-        float rayScale = depth / localRay.magnitude;
-
-        return cameraWorldPosition + worldRay.normalized * (depth);
-        // Note: if you want perspective-correct depth (depth along optical axis),
-        // replace the last line with:
-        //   return cameraWorldPosition + worldRay * rayScale;
-        // and remove the .normalized. Try both — for wide-FOV cameras the
-        // non-normalized version places edge detections more accurately.
+        return cameraWorldPosition + _cameraWorldRotation * (localRay * depth);
     }
 
     Vector3 DetectionToWorldPosition(Detection det)
@@ -282,8 +247,6 @@ public class DetectionOverlay : MonoBehaviour
         return PixelToWorldPosition((int)cx, (int)cy, det.depth_m);
     }
 
-    // Unity-side EMA to smooth rapidly-changing MiDaS depth readings.
-    // depthAlpha=0.15 matches the server-side DEPTH_ALPHA for double smoothing.
     float SmoothedDepth(int idx, float rawDepth)
     {
         if (rawDepth <= minDepth || rawDepth >= maxDepth)
@@ -299,10 +262,39 @@ public class DetectionOverlay : MonoBehaviour
         return _depthEma[idx];
     }
 
+    // Catmull-Rom spline — smooths the raw contour points into a curved outline.
+    // Runs entirely on Unity CPU, zero extra load on the Jetson.
+    Vector3[] CatmullRomSpline(Vector3[] pts, int subdivisions)
+    {
+        if (pts.Length < 3) return pts;
+        int n = pts.Length;
+        var result = new List<Vector3>(n * subdivisions);
+
+        for (int i = 0; i < n; i++)
+        {
+            Vector3 p0 = pts[(i - 1 + n) % n];
+            Vector3 p1 = pts[i];
+            Vector3 p2 = pts[(i + 1) % n];
+            Vector3 p3 = pts[(i + 2) % n];
+
+            for (int s = 0; s < subdivisions; s++)
+            {
+                float t = s / (float)subdivisions;
+                float t2 = t * t;
+                float t3 = t2 * t;
+                result.Add(0.5f * (
+                      2f * p1
+                    + (-p0 + p2) * t
+                    + (2f * p0 - 5f * p1 + 4f * p2 - p3) * t2
+                    + (-p0 + 3f * p1 - 3f * p2 + p3) * t3
+                ));
+            }
+        }
+        return result.ToArray();
+    }
+
     void UpdateMarkers(List<Detection> detections)
     {
-        if (markerPrefab == null) { Debug.LogError("markerPrefab is NULL"); return; }
-
         HashSet<int> activeIndices = new HashSet<int>();
 
         for (int i = 0; i < detections.Count; i++)
@@ -310,52 +302,50 @@ public class DetectionOverlay : MonoBehaviour
             Detection det = detections[i];
             activeIndices.Add(i);
 
-            // Apply Unity-side depth smoothing
             float smoothDepth = SmoothedDepth(i, det.depth_m);
-            det.depth_m = smoothDepth;   // patch in-place for downstream use
+            det.depth_m = smoothDepth;
+            Vector3 personWorldPos = DetectionToWorldPosition(det);
+            float displayDepth = Vector3.Distance(Camera.main.transform.position, personWorldPos);
 
-            // ── Label marker ────────────────────────────────────────────
-            if (!_markerPool.ContainsKey(i) || _markerPool[i] == null)
+            if (markerPrefab != null)
             {
-                var go = Instantiate(markerPrefab, transform);
-                _markerPool[i] = go.GetComponent<ThroughWallMarker>();
-                if (_markerPool[i] == null)
+                if (!_markerPool.ContainsKey(i) || _markerPool[i] == null)
                 {
-                    Destroy(go);
-                    continue;
+                    var go = Instantiate(markerPrefab, transform);
+                    _markerPool[i] = go.GetComponent<ThroughWallMarker>();
+                    if (_markerPool[i] == null) Destroy(go);
+                }
+
+                if (_markerPool.ContainsKey(i) && _markerPool[i] != null)
+                {
+                    Vector3 worldPos = DetectionToWorldPosition(det);
+                    _markerPool[i].SetData(det.label.Split(' ')[0], displayDepth, worldPos);
                 }
             }
 
-            Vector3 worldPos = DetectionToWorldPosition(det);
-            _markerPool[i].SetData(det.label.Split(' ')[0], det.depth_m, worldPos);
-
-            // ── Contour outline ──────────────────────────────────────────
-            UpdateOutline(i, det);
+            UpdateOutline(i, det, displayDepth);
         }
 
-        // Hide stale entries (detections that disappeared this frame)
         foreach (var kvp in _markerPool)
-        {
             if (!activeIndices.Contains(kvp.Key) && kvp.Value != null)
                 kvp.Value.Hide();
-        }
 
         foreach (var kvp in _outlinePool)
-        {
             if (!activeIndices.Contains(kvp.Key) && kvp.Value != null)
                 kvp.Value.positionCount = 0;
-        }
 
-        // Clean up EMA entries for gone detections
+        foreach (var kvp in _labelPool)
+            if (!activeIndices.Contains(kvp.Key) && kvp.Value != null)
+                kvp.Value.gameObject.SetActive(false);
+
         List<int> staleEma = new List<int>();
         foreach (var k in _depthEma.Keys)
             if (!activeIndices.Contains(k)) staleEma.Add(k);
         foreach (var k in staleEma) _depthEma.Remove(k);
     }
 
-    void UpdateOutline(int idx, Detection det)
+    void UpdateOutline(int idx, Detection det, float displayDepth)
     {
-        // ── Get or create LineRenderer ───────────────────────────────────
         if (!_outlinePool.ContainsKey(idx) || _outlinePool[idx] == null)
         {
             var go = new GameObject($"PersonOutline_{idx}");
@@ -369,7 +359,7 @@ public class DetectionOverlay : MonoBehaviour
             lr.material = _outlineMaterial;
             lr.startColor = outlineColor;
             lr.endColor = outlineColor;
-            lr.numCapVertices = 4;
+            lr.numCapVertices = 8;
             lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             lr.receiveShadows = false;
 
@@ -377,58 +367,94 @@ public class DetectionOverlay : MonoBehaviour
         }
 
         LineRenderer line = _outlinePool[idx];
-
-        // Ensure the line is enabled (it may have been disabled in a previous frame)
         line.enabled = true;
 
-        // ── No contour yet → draw bounding box as placeholder ───────────
         if (det.contour == null || det.contour.Length < 4)
         {
             DrawBoundingBoxOutline(line, det);
+            UpdateDepthLabel(idx, det, displayDepth);
             return;
         }
 
         int pointCount = det.contour.Length / 2;
-        if (pointCount < 2)
+        if (pointCount < 3)
         {
             DrawBoundingBoxOutline(line, det);
+            UpdateDepthLabel(idx, det, displayDepth);
             return;
         }
 
-        // ── Project every contour point into world space ─────────────────
-        // All points share the detection's smoothed depth.  If you later switch
-        // to a RealSense pipeline that gives per-pixel depth, pass each point's
-        // own depth here instead.
-        float depth = (det.depth_m > minDepth && det.depth_m < maxDepth)
-                      ? det.depth_m : fallbackDepth;
-
-        line.positionCount = pointCount;
-
+        // Project raw contour pixels into world space
+        var raw = new Vector3[pointCount];
         for (int p = 0; p < pointCount; p++)
-        {
-            int px = det.contour[p * 2];
-            int py = det.contour[p * 2 + 1];
-            line.SetPosition(p, PixelToWorldPosition(px, py, depth));
-        }
+            raw[p] = PixelToWorldPosition(
+                det.contour[p * 2], det.contour[p * 2 + 1], det.depth_m);
+
+        // Smooth with Catmull-Rom spline — turns jagged polygon into a curve
+        Vector3[] smoothed = CatmullRomSpline(raw, splineSubdivisions);
+
+        line.positionCount = smoothed.Length;
+        for (int p = 0; p < smoothed.Length; p++)
+            line.SetPosition(p, smoothed[p]);
+
+        UpdateDepthLabel(idx, det, displayDepth);
     }
 
-    // Fallback: 4-corner bounding-box rectangle shown while SAM2 warms up
+    void UpdateDepthLabel(int idx, Detection det, float displayDepth)
+    {
+        if (!_labelPool.ContainsKey(idx) || _labelPool[idx] == null)
+        {
+            var go = new GameObject($"DepthLabel_{idx}");
+            go.transform.SetParent(transform);
+
+            var tm = go.AddComponent<TextMesh>();
+            tm.anchor = TextAnchor.LowerCenter;
+            tm.alignment = TextAlignment.Center;
+            tm.fontSize = 48;
+            tm.color = labelColor;
+
+            var mr = go.GetComponent<MeshRenderer>();
+            mr.material.renderQueue = 4500;
+
+            _labelPool[idx] = tm;
+        }
+
+        TextMesh label = _labelPool[idx];
+        label.gameObject.SetActive(true);
+
+        float scaledDepth = det.depth_m * depthScale;
+        string depthStr = (scaledDepth > minDepth && scaledDepth < maxDepth)
+                          ? $"{displayDepth:F1} m"
+                          : "-- m";
+        label.text = $"person\n{depthStr}";
+        label.color = labelColor;
+
+        int topCX = (det.x1 + det.x2) / 2;
+        Vector3 topWorld = PixelToWorldPosition(topCX, det.y1, det.depth_m);
+        label.transform.position = topWorld + Vector3.up * (labelSize * 0.5f);
+
+        float scale = labelSize / 10f;
+        label.transform.localScale = Vector3.one * scale;
+
+        label.transform.LookAt(Camera.main.transform.position);
+        label.transform.Rotate(0f, 180f, 0f);
+    }
+
     void DrawBoundingBoxOutline(LineRenderer line, Detection det)
     {
-        float depth = (det.depth_m > minDepth && det.depth_m < maxDepth)
-                      ? det.depth_m : fallbackDepth;
-
         line.positionCount = 4;
-        line.SetPosition(0, PixelToWorldPosition(det.x1, det.y1, depth));
-        line.SetPosition(1, PixelToWorldPosition(det.x2, det.y1, depth));
-        line.SetPosition(2, PixelToWorldPosition(det.x2, det.y2, depth));
-        line.SetPosition(3, PixelToWorldPosition(det.x1, det.y2, depth));
+        line.SetPosition(0, PixelToWorldPosition(det.x1, det.y1, det.depth_m));
+        line.SetPosition(1, PixelToWorldPosition(det.x2, det.y1, det.depth_m));
+        line.SetPosition(2, PixelToWorldPosition(det.x2, det.y2, det.depth_m));
+        line.SetPosition(3, PixelToWorldPosition(det.x1, det.y2, det.depth_m));
     }
 
     void HideAllOutlines()
     {
         foreach (var lr in _outlinePool.Values)
             if (lr != null) lr.positionCount = 0;
+        foreach (var tm in _labelPool.Values)
+            if (tm != null) tm.gameObject.SetActive(false);
     }
 
     void HideAll()
