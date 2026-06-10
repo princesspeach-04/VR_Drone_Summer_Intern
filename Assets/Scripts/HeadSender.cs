@@ -1,6 +1,5 @@
 using UnityEngine;
 using Unity.XR.CoreUtils;
-using System.Collections;
 using System.Net.Sockets;
 using System.Text;
 
@@ -17,6 +16,10 @@ public class HeadSender : MonoBehaviour
     [Range(0.01f, 1f)]
     public float smoothing = 0.1f;
 
+    [Header("Mode")]
+    [Tooltip("Assign ModeManager here — gimbal only moves in Camera Feed mode.")]
+    public ModeManager modeManager;
+
     private UdpClient client;
     private float smoothYaw = 0f;
     private float smoothPitch = 0f;
@@ -24,13 +27,14 @@ public class HeadSender : MonoBehaviour
     private float basePitch = 0f;
     private bool calibrated = false;
 
+    private bool _wasPassthrough = true;
+
     void Start()
     {
-        // Initialize immediately — no coroutine delay
         try
         {
             client = new UdpClient();
-            client.Connect(jetsonIP, port); // pre-connect so Send is simpler
+            client.Connect(jetsonIP, port);
             Debug.Log("[HEAD] UDP client connected to " + jetsonIP + ":" + port);
         }
         catch (System.Exception e)
@@ -41,51 +45,61 @@ public class HeadSender : MonoBehaviour
 
     void Update()
     {
-        // Guard against null client
-        if (client == null)
-        {
-            Debug.LogError("[HEAD] UDP client is null!");
-            return;
-        }
+        if (client == null) { Debug.LogError("[HEAD] UDP client is null!"); return; }
+        if (xrOrigin == null) { Debug.LogError("[HEAD] XR Origin missing!"); return; }
+        if (xrOrigin.Camera == null) { Debug.LogError("[HEAD] XR Camera missing!"); return; }
 
-        if (xrOrigin == null)
-        {
-            Debug.LogError("[HEAD] XR Origin missing!");
-            return;
-        }
+        bool isPassthrough = modeManager == null ? false : modeManager.IsPassthrough;
 
-        if (xrOrigin.Camera == null)
-        {
-            Debug.LogError("[HEAD] XR Camera missing!");
-            return;
-        }
+        // ── Mode transition: camera feed → passthrough ───────────────────
+        // Gimbal freezes — send nothing from here on until back in feed.
+        if (!_wasPassthrough && isPassthrough)
+            Debug.Log("[HEAD] Switched to Passthrough — gimbal frozen");
+
+        _wasPassthrough = isPassthrough;
+
+        // Don't send while in passthrough — gimbal stays frozen at last angle
+        if (isPassthrough) return;
 
         Transform headset = xrOrigin.Camera.transform;
         Vector3 forward = headset.forward;
 
         float yaw = Mathf.Atan2(forward.x, forward.z) * Mathf.Rad2Deg;
-        float pitch = Mathf.Asin(forward.y) * Mathf.Rad2Deg;
+        float pitch = Mathf.Asin(Mathf.Clamp(forward.y, -1f, 1f)) * Mathf.Rad2Deg;
 
+        // Calibrate base once at first ever frame in camera feed mode.
+        // Never recalibrate again — base stays fixed for the whole session.
+        // This means relative angles are always computed from the same origin,
+        // so switching back from passthrough immediately sends the correct
+        // angle for wherever the head is pointing right now.
         if (!calibrated)
         {
             baseYaw = yaw;
             basePitch = pitch;
             calibrated = true;
-            Debug.Log("[HEAD] CALIBRATED");
+            Debug.Log($"[HEAD] CALIBRATED — base Yaw={baseYaw:F1} Pitch={basePitch:F1}");
         }
 
         float relativeYaw = Mathf.DeltaAngle(baseYaw, yaw);
         float relativePitch = pitch - basePitch;
 
+        // Smoothing still applies every frame in feed mode.
+        // On switch-back from passthrough, smoothYaw/smoothPitch will lerp
+        // from the frozen value toward the new head angle over a few frames —
+        // giving a natural catch-up feel rather than a hard snap.
         smoothYaw = Mathf.Lerp(smoothYaw, relativeYaw, smoothing);
         smoothPitch = Mathf.Lerp(smoothPitch, relativePitch, smoothing);
 
-        string msg = smoothYaw.ToString("F2") + "," + smoothPitch.ToString("F2");
-        byte[] data = Encoding.UTF8.GetBytes(msg);
+        SendGimbal(smoothYaw, smoothPitch);
+    }
 
+    void SendGimbal(float yaw, float pitch)
+    {
+        string msg = yaw.ToString("F2") + "," + pitch.ToString("F2");
+        byte[] data = Encoding.UTF8.GetBytes(msg);
         try
         {
-            client.Send(data, data.Length); // uses pre-connected address
+            client.Send(data, data.Length);
             Debug.Log("[HEAD] Sent: " + msg);
         }
         catch (System.Exception e)
@@ -96,7 +110,7 @@ public class HeadSender : MonoBehaviour
 
     void OnApplicationQuit()
     {
-        if (client != null)
-            client.Close();
+        SendGimbal(0f, 0f);
+        if (client != null) client.Close();
     }
 }

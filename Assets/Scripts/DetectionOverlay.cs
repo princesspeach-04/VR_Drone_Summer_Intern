@@ -50,10 +50,18 @@ public class DetectionOverlay : MonoBehaviour
     public float yawTrimDegrees = 0f;
     public float pitchTrimDegrees = 0f;
 
+    [Header("Boot Calibration (B button)")]
+    [Tooltip("Physical distance in metres from your seated head position to the camera. " +
+             "Measure once with a tape measure.")]
+    public float physicalDistanceToCamera = 3.5f;
+
+    [Tooltip("Hold B for this many seconds to reset trim to zero (short press = calibrate).")]
+    public float bLongPressDuration = 5f;
+
     [Header("Outline Appearance")]
     [Tooltip("Width of the person outline in world units (metres).")]
     public float outlineWidth = 0.03f;
-    public Color outlineColor = new Color(0f, 1f, 0.4f, 1f);  // green
+    public Color outlineColor = new Color(0f, 1f, 0.4f, 1f);
 
     [Header("Depth Label (shown above outline, no prefab needed)")]
     [Tooltip("World-space height of the text in metres.")]
@@ -87,6 +95,9 @@ public class DetectionOverlay : MonoBehaviour
     private float _pitchRepeatTimer = 0f;
     private bool _yawWasNeutral = true;
     private bool _pitchWasNeutral = true;
+
+    private float _bHoldTimer = 0f;
+    private bool _bLongPressTriggered = false;
 
     private Dictionary<int, ThroughWallMarker> _markerPool = new();
     private Dictionary<int, LineRenderer> _outlinePool = new();
@@ -128,13 +139,73 @@ public class DetectionOverlay : MonoBehaviour
                       $"  Forward={_cameraWorldRotation * Vector3.forward}");
         }
 
-        if (OVRInput.GetDown(OVRInput.Button.Two))
+        // ── B button — short press = calibrate, long press = reset trim ──
+        if (OVRInput.Get(OVRInput.Button.Two))
         {
-            yawTrimDegrees = 0f;
-            pitchTrimDegrees = 0f;
-            RebuildRotation();
-            Debug.Log("[Calib] Trim reset to 0");
+            _bHoldTimer += Time.deltaTime;
+
+            if (_bHoldTimer >= bLongPressDuration && !_bLongPressTriggered)
+            {
+                _bLongPressTriggered = true;
+                yawTrimDegrees = 0f;
+                pitchTrimDegrees = 0f;
+                RebuildRotation();
+                Debug.Log("[Calib] Trim reset to 0 (long press)");
+            }
         }
+
+        if (OVRInput.GetUp(OVRInput.Button.Two))
+        {
+            if (!_bLongPressTriggered)
+                CalibrateCamera();
+
+            _bHoldTimer = 0f;
+            _bLongPressTriggered = false;
+        }
+    }
+
+    // ── Boot calibration ─────────────────────────────────────────────────────
+    // You sit facing the same direction as the camera.
+    //
+    // What it does:
+    //   1. Reads your head position and forward direction at the moment you press B.
+    //   2. Camera is physicalDistanceToCamera metres in front of you, facing the
+    //      SAME direction as you (you and the camera both face the same wall).
+    //   3. Sets cameraWorldPosition and cameraWorldEuler from that — no hardcoding
+    //      of position or angles needed, only the physical distance.
+    // ─────────────────────────────────────────────────────────────────────────
+    void CalibrateCamera()
+    {
+        if (Camera.main == null)
+        {
+            Debug.LogError("[Calib] Camera.main is null — calibration failed");
+            return;
+        }
+
+        Transform head = Camera.main.transform;
+
+        // Flatten head forward to horizontal plane — ignore any head tilt
+        Vector3 headForward = head.forward;
+        headForward.y = 0f;
+        headForward.Normalize();
+
+        // Camera is in front of you, same direction you're facing
+        cameraWorldPosition = head.position + headForward * physicalDistanceToCamera;
+
+        // Camera faces the same direction as you — NOT back toward you.
+        // You and the camera are both looking at the same wall.
+        cameraWorldEuler = Quaternion.LookRotation(headForward, Vector3.up).eulerAngles;
+
+        // Clear thumbstick trim — calibration sets the clean baseline
+        yawTrimDegrees = 0f;
+        pitchTrimDegrees = 0f;
+
+        RebuildRotation();
+
+        Debug.Log($"[Calib] Done!  " +
+                  $"Pos={cameraWorldPosition}  " +
+                  $"Euler={cameraWorldEuler}  " +
+                  $"Dist={physicalDistanceToCamera}m");
     }
 
     bool HandleAxis(float axis, ref float trim,
@@ -222,6 +293,8 @@ public class DetectionOverlay : MonoBehaviour
         if (_passthroughMode) UpdateMarkers(detections);
     }
 
+    // ── FIXED: ray is normalized before scaling by depth so diagonal pixels
+    //    don't end up slightly farther than centre pixels.
     Vector3 PixelToWorldPosition(int px, int py, float rawDepth)
     {
         float depth = rawDepth * depthScale;
@@ -235,9 +308,10 @@ public class DetectionOverlay : MonoBehaviour
         float tanH = Mathf.Tan(cameraHFov * 0.5f * Mathf.Deg2Rad);
         float tanV = tanH * ((float)streamHeight / streamWidth);
 
-        Vector3 localRay = new Vector3(ndcX * tanH, ndcY * tanV, 1f);
+        // Normalize before multiplying by depth — fixes edge-pixel depth error
+        Vector3 localRay = new Vector3(ndcX * tanH, ndcY * tanV, 1f).normalized;
 
-        return cameraWorldPosition + _cameraWorldRotation * (localRay * depth);
+        return cameraWorldPosition + _cameraWorldRotation * localRay * depth;
     }
 
     Vector3 DetectionToWorldPosition(Detection det)
@@ -262,8 +336,6 @@ public class DetectionOverlay : MonoBehaviour
         return _depthEma[idx];
     }
 
-    // Catmull-Rom spline — smooths the raw contour points into a curved outline.
-    // Runs entirely on Unity CPU, zero extra load on the Jetson.
     Vector3[] CatmullRomSpline(Vector3[] pts, int subdivisions)
     {
         if (pts.Length < 3) return pts;
@@ -384,13 +456,11 @@ public class DetectionOverlay : MonoBehaviour
             return;
         }
 
-        // Project raw contour pixels into world space
         var raw = new Vector3[pointCount];
         for (int p = 0; p < pointCount; p++)
             raw[p] = PixelToWorldPosition(
                 det.contour[p * 2], det.contour[p * 2 + 1], det.depth_m);
 
-        // Smooth with Catmull-Rom spline — turns jagged polygon into a curve
         Vector3[] smoothed = CatmullRomSpline(raw, splineSubdivisions);
 
         line.positionCount = smoothed.Length;

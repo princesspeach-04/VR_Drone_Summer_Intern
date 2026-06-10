@@ -224,6 +224,7 @@ MonoBehaviour:
   jetsonIP: 100.94.87.80
   port: 5005
   smoothing: 0.1
+  modeManager: {fileID: 1766127746}
 --- !u!114 &727343826
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -530,7 +531,7 @@ MonoBehaviour:
   pollInterval: 0.15
   streamWidth: 640
   streamHeight: 360
-  cameraWorldPosition: {x: 0, y: 0, z: 1}
+  cameraWorldPosition: {x: 0, y: 0, z: -3.58}
   cameraWorldEuler: {x: 0, y: 0, z: 0}
   cameraHFov: 81
   minDepth: 0.3
@@ -541,12 +542,15 @@ MonoBehaviour:
   trimRepeatDelay: 0.2
   yawTrimDegrees: 0
   pitchTrimDegrees: 0
+  physicalDistanceToCamera: 3.5
+  bLongPressDuration: 1.5
   outlineWidth: 0.02
   outlineColor: {r: 0, g: 1, b: 0.4, a: 1}
   labelSize: 0.12
   labelColor: {r: 0, g: 1, b: 0.4, a: 1}
   depthAlpha: 0.15
   depthScale: 1
+  splineSubdivisions: 3
   videoScreen: {fileID: 1429373123}
   markerPrefab: {fileID: 0}
 --- !u!4 &1742675980
