@@ -20,13 +20,17 @@ public class HeadSender : MonoBehaviour
     [Tooltip("Assign ModeManager here — gimbal only moves in Camera Feed mode.")]
     public ModeManager modeManager;
 
+    [Header("Overlay sync")]
+    [Tooltip("Assign DetectionOverlay here — gimbal angles are forwarded so " +
+             "outlines follow the physical camera rotation.")]
+    public DetectionOverlay detectionOverlay;
+
     private UdpClient client;
     private float smoothYaw = 0f;
     private float smoothPitch = 0f;
     private float baseYaw = 0f;
     private float basePitch = 0f;
     private bool calibrated = false;
-
     private bool _wasPassthrough = true;
 
     void Start()
@@ -51,14 +55,11 @@ public class HeadSender : MonoBehaviour
 
         bool isPassthrough = modeManager == null ? false : modeManager.IsPassthrough;
 
-        // ── Mode transition: camera feed → passthrough ───────────────────
-        // Gimbal freezes — send nothing from here on until back in feed.
         if (!_wasPassthrough && isPassthrough)
             Debug.Log("[HEAD] Switched to Passthrough — gimbal frozen");
 
         _wasPassthrough = isPassthrough;
 
-        // Don't send while in passthrough — gimbal stays frozen at last angle
         if (isPassthrough) return;
 
         Transform headset = xrOrigin.Camera.transform;
@@ -67,11 +68,6 @@ public class HeadSender : MonoBehaviour
         float yaw = Mathf.Atan2(forward.x, forward.z) * Mathf.Rad2Deg;
         float pitch = Mathf.Asin(Mathf.Clamp(forward.y, -1f, 1f)) * Mathf.Rad2Deg;
 
-        // Calibrate base once at first ever frame in camera feed mode.
-        // Never recalibrate again — base stays fixed for the whole session.
-        // This means relative angles are always computed from the same origin,
-        // so switching back from passthrough immediately sends the correct
-        // angle for wherever the head is pointing right now.
         if (!calibrated)
         {
             baseYaw = yaw;
@@ -83,14 +79,15 @@ public class HeadSender : MonoBehaviour
         float relativeYaw = Mathf.DeltaAngle(baseYaw, yaw);
         float relativePitch = pitch - basePitch;
 
-        // Smoothing still applies every frame in feed mode.
-        // On switch-back from passthrough, smoothYaw/smoothPitch will lerp
-        // from the frozen value toward the new head angle over a few frames —
-        // giving a natural catch-up feel rather than a hard snap.
         smoothYaw = Mathf.Lerp(smoothYaw, relativeYaw, smoothing);
         smoothPitch = Mathf.Lerp(smoothPitch, relativePitch, smoothing);
 
         SendGimbal(smoothYaw, smoothPitch);
+
+        // Forward the same angles to DetectionOverlay so pixel→world projection
+        // accounts for where the gimbal is actually pointing right now.
+        if (detectionOverlay != null)
+            detectionOverlay.SetGimbalAngles(smoothYaw, smoothPitch);
     }
 
     void SendGimbal(float yaw, float pitch)

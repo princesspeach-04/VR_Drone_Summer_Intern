@@ -56,7 +56,7 @@ public class DetectionOverlay : MonoBehaviour
     public float physicalDistanceToCamera = 3.5f;
 
     [Tooltip("Hold B for this many seconds to reset trim to zero (short press = calibrate).")]
-    public float bLongPressDuration = 5f;
+    public float bLongPressDuration = 1.5f;
 
     [Header("Outline Appearance")]
     [Tooltip("Width of the person outline in world units (metres).")]
@@ -108,6 +108,11 @@ public class DetectionOverlay : MonoBehaviour
     private bool _lastPollFailed = false;
 
     private Material _outlineMaterial;
+
+    // Gimbal angles forwarded from HeadSender every frame in feed mode.
+    // Zero in passthrough (gimbal frozen) — projection uses base rotation only.
+    private float _gimbalYaw = 0f;
+    private float _gimbalPitch = 0f;
 
     void Start()
     {
@@ -311,7 +316,11 @@ public class DetectionOverlay : MonoBehaviour
         // Normalize before multiplying by depth — fixes edge-pixel depth error
         Vector3 localRay = new Vector3(ndcX * tanH, ndcY * tanV, 1f).normalized;
 
-        return cameraWorldPosition + _cameraWorldRotation * localRay * depth;
+        // Apply gimbal rotation on top of the calibrated base — this is what
+        // makes outlines follow the physical camera when the gimbal has rotated.
+        Quaternion finalRot = _cameraWorldRotation
+                              * Quaternion.Euler(-_gimbalPitch, _gimbalYaw, 0f);
+        return cameraWorldPosition + finalRot * localRay * depth;
     }
 
     Vector3 DetectionToWorldPosition(Detection det)
@@ -532,6 +541,15 @@ public class DetectionOverlay : MonoBehaviour
         foreach (var m in _markerPool.Values)
             if (m != null) m.Hide();
         HideAllOutlines();
+    }
+
+
+    // Called by HeadSender every frame while in camera feed mode.
+    // Resets to zero automatically when gimbal is frozen (passthrough).
+    public void SetGimbalAngles(float yaw, float pitch)
+    {
+        _gimbalYaw = yaw;
+        _gimbalPitch = pitch;
     }
 
     void OnDrawGizmos()

@@ -225,6 +225,7 @@ MonoBehaviour:
   port: 5005
   smoothing: 0.1
   modeManager: {fileID: 1766127746}
+  detectionOverlay: {fileID: 1742675979}
 --- !u!114 &727343826
 MonoBehaviour:
   m_ObjectHideFlags: 0
